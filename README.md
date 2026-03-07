@@ -62,19 +62,3 @@ prompts/新能源翻译专家.md
 ```
 
 3. 刷新 WebUI，即可在角色下拉菜单中看到新角色
-
-## 命令行模式（可选）
-
-如需命令行运行，可使用：
-
-```bash
-go run ./cmd/autotrans -c config.json
-```
-
-如果配置中使用角色，可增加字段：
-
-```json
-{
-  "prompt_role": "金融翻译专家"
-}
-```
