@@ -12,6 +12,32 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentFile = null;
     let eventSource = null;
 
+    function saveHistory(config) {
+        localStorage.setItem('auto_trans_config', JSON.stringify({
+            api_url: config.api_url,
+            request_timeout_sec: config.request_timeout_sec,
+            max_retries: config.max_retries,
+            bilingual: config.bilingual
+        }));
+    }
+
+    function loadHistory() {
+        try {
+            const saved = localStorage.getItem('auto_trans_config');
+            if (saved) {
+                const conf = JSON.parse(saved);
+                if (conf.api_url) document.querySelector('input[name="api_url"]').value = conf.api_url;
+                if (conf.request_timeout_sec) document.querySelector('input[name="request_timeout_sec"]').value = conf.request_timeout_sec;
+                if (conf.max_retries) document.querySelector('input[name="max_retries"]').value = conf.max_retries;
+                if (conf.bilingual !== undefined) document.querySelector('input[name="bilingual"]').checked = conf.bilingual;
+            }
+        } catch (e) {
+            console.warn("Failed to load history", e);
+        }
+    }
+
+    loadHistory();
+
     const modelSelect = document.getElementById('modelSelect');
     const modelInput = document.getElementById('modelInput');
     const roleSelect = document.getElementById('roleSelect');
@@ -74,15 +100,32 @@ document.addEventListener('DOMContentLoaded', () => {
             if (res.ok) {
                 const data = await res.json();
                 if (data.roles && data.roles.length > 0) {
+                    let globalRoles = [];
                     roleSelect.innerHTML = '';
                     data.roles.forEach(role => {
                         const opt = document.createElement('option');
-                        opt.value = role;
-                        opt.textContent = role;
+                        opt.value = role.name;
+                        opt.textContent = role.name;
                         roleSelect.appendChild(opt);
                     });
-                    if (data.roles.includes('金融翻译专家')) {
+                    globalRoles = data.roles;
+
+                    const rolePreview = document.getElementById('rolePreview');
+                    roleSelect.addEventListener('change', () => {
+                        const selected = globalRoles.find(r => r.name === roleSelect.value);
+                        if (selected && selected.preview) {
+                            rolePreview.textContent = selected.preview;
+                            rolePreview.style.display = 'block';
+                        } else {
+                            rolePreview.style.display = 'none';
+                        }
+                    });
+
+                    if (data.roles.find(r => r.name === '金融翻译专家')) {
                         roleSelect.value = '金融翻译专家';
+                        roleSelect.dispatchEvent(new Event('change'));
+                    } else if (data.roles.length > 0) {
+                        roleSelect.dispatchEvent(new Event('change'));
                     }
                 }
             }
@@ -113,6 +156,41 @@ document.addEventListener('DOMContentLoaded', () => {
         terminalLog.scrollTop = terminalLog.scrollHeight;
     }
 
+    // Fetch Explanation Function
+    async function fetchExplanation() {
+        if (!currentFile) return;
+        const formData = new FormData(configForm);
+        const config = Object.fromEntries(formData);
+
+        // Setup config same as translate
+        config.request_timeout_sec = parseInt(config.request_timeout_sec);
+        config.max_retries = parseInt(config.max_retries);
+
+        try {
+            const res = await fetch('/api/explain_config', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(config)
+            });
+            if (res.ok) {
+                const data = await res.json();
+                const configExplanation = document.getElementById('configExplanation');
+                configExplanation.textContent = data.explanation;
+                configExplanation.classList.remove('hidden');
+            }
+        } catch (e) {
+            console.warn("Failed to fetch explanation", e);
+        }
+    }
+
+    configForm.addEventListener('change', () => {
+        if (!dashboard.classList.contains('hidden')) {
+            // Debounced fetch
+            clearTimeout(window.explainTimeout);
+            window.explainTimeout = setTimeout(fetchExplanation, 500);
+        }
+    });
+
     // File Handling
     fileInput.addEventListener('change', (e) => {
         if (e.target.files.length > 0) {
@@ -125,6 +203,8 @@ document.addEventListener('DOMContentLoaded', () => {
             // Layout Shift
             topBar.style.display = 'none';
             uploadZone.style.padding = '30px';
+
+            fetchExplanation();
         }
     });
 
@@ -179,11 +259,17 @@ document.addEventListener('DOMContentLoaded', () => {
         apiFormData.append('file', currentFile);
         apiFormData.append('config', JSON.stringify(config));
 
+        saveHistory(config);
+
         startBtn.disabled = true;
         startBtn.textContent = '翻译中...';
         document.getElementById('statusBadge').textContent = '执行中';
         document.getElementById('statusBadge').style.backgroundColor = 'rgba(248, 81, 73, 0.1)';
         document.getElementById('statusBadge').style.color = 'var(--text-red)';
+
+        document.getElementById('statsDashboard').classList.add('hidden');
+        document.getElementById('downloadFailuresBtn').classList.add('hidden');
+        downloadBtn.classList.add('hidden');
 
         log('正在上传文档并初始化引擎参数...', 'gray');
 
@@ -250,6 +336,27 @@ document.addEventListener('DOMContentLoaded', () => {
                 downloadBtn.onclick = () => {
                     window.location.href = `/api/download?task_id=${taskId}`;
                 };
+
+                // Fetch Stats
+                fetch(`/api/task_status?task_id=${taskId}`).then(res => res.json()).then(taskData => {
+                    if (taskData.stats) {
+                        document.getElementById('statsDashboard').classList.remove('hidden');
+                        document.getElementById('statSuccess').textContent = `成功: ${taskData.stats.success_count || 0}`;
+                        document.getElementById('statFallback').textContent = `降级: ${taskData.stats.fallback_count || 0}`;
+                        document.getElementById('statRefused').textContent = `拒答: ${taskData.stats.refused_count || 0}`;
+                        document.getElementById('statFailed').textContent = `失败: ${taskData.stats.failure_count || 0}`;
+
+                        if (taskData.stats.failed_blocks && taskData.stats.failed_blocks.length > 0) {
+                            const dfBtn = document.getElementById('downloadFailuresBtn');
+                            dfBtn.classList.remove('hidden');
+                            dfBtn.textContent = `下载失败记录 (${taskData.stats.failed_blocks.length})`;
+                            dfBtn.onclick = () => {
+                                window.location.href = `/api/download_failures?task_id=${taskId}`;
+                            };
+                        }
+                    }
+                }).catch(e => console.error("Failed to fetch stats", e));
+
             }
 
             // Handle Error

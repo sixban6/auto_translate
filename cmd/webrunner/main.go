@@ -32,6 +32,7 @@ type TranslationTask struct {
 	OutPath   string
 	MessageCh chan LogMsg
 	Error     string
+	Stats     processor.TranslationStats
 }
 
 type LogMsg struct {
@@ -76,6 +77,12 @@ func main() {
 	http.HandleFunc("/api/download", handleDownload)
 	// API Endpoint: Load Roles
 	http.HandleFunc("/api/roles", handleRoles)
+	// API Endpoint: Explain Config
+	http.HandleFunc("/api/explain_config", handleExplainConfig)
+	// API Endpoint: Download Failures
+	http.HandleFunc("/api/download_failures", handleDownloadFailures)
+	// API Endpoint: Get Task Status and Stats
+	http.HandleFunc("/api/task_status", handleTaskStatus)
 
 	port := getAvailablePort(4000)
 	fmt.Printf("Web server is running beautifully at http://localhost:%d\n", port)
@@ -137,6 +144,8 @@ func handleTranslateStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid config JSON", http.StatusBadRequest)
 		return
 	}
+	cfg.AutoDetectAndCalculate()
+
 	if cfg.PromptRole != "" {
 		prompt, err := loadPromptByRole(cfg.PromptRole)
 		if err != nil {
@@ -261,6 +270,60 @@ func handleDownload(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, task.OutPath)
 }
 
+func handleDownloadFailures(w http.ResponseWriter, r *http.Request) {
+	taskID := r.URL.Query().Get("task_id")
+	mu.Lock()
+	task, ok := tasks[taskID]
+	mu.Unlock()
+
+	if !ok || task.Status != "completed" {
+		http.Error(w, "Task not found or not completed", http.StatusNotFound)
+		return
+	}
+
+	if len(task.Stats.FailedBlocks) == 0 {
+		http.Error(w, "No failures found for this task", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Disposition", "attachment; filename=failures_list.txt")
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+
+	var sb strings.Builder
+	sb.WriteString("=====================================\n")
+	sb.WriteString(fmt.Sprintf("翻译失败人工校对清单 (总计: %d条)\n", len(task.Stats.FailedBlocks)))
+	sb.WriteString("=====================================\n\n")
+	for i, fb := range task.Stats.FailedBlocks {
+		sb.WriteString(fmt.Sprintf("【块ID: %s】 (错误: %s)\n", fb.ID, fb.Error))
+		sb.WriteString("-------------------------------------\n")
+		sb.WriteString(strings.TrimSpace(fb.OriginalText) + "\n\n")
+		// if more than 1000 items, stop to avoid memory issues
+		if i > 1000 {
+			sb.WriteString(fmt.Sprintf("... (剩余 %d 条被省略) ...\n", len(task.Stats.FailedBlocks)-1000))
+			break
+		}
+	}
+	w.Write([]byte(sb.String()))
+}
+
+func handleTaskStatus(w http.ResponseWriter, r *http.Request) {
+	taskID := r.URL.Query().Get("task_id")
+	mu.Lock()
+	task, ok := tasks[taskID]
+	mu.Unlock()
+
+	if !ok {
+		http.Error(w, "Task not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status": task.Status,
+		"stats":  task.Stats,
+	})
+}
+
 func handleModels(w http.ResponseWriter, r *http.Request) {
 	apiURL := r.URL.Query().Get("api_url")
 	if apiURL == "" {
@@ -313,17 +376,24 @@ func handleRoles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	roles := make([]string, 0)
+	type RoleInfo struct {
+		Name    string `json:"name"`
+		Preview string `json:"preview"`
+	}
+
+	roles := make([]RoleInfo, 0)
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
 		}
 		name := entry.Name()
 		if strings.HasSuffix(strings.ToLower(name), ".md") {
-			roles = append(roles, strings.TrimSuffix(name, filepath.Ext(name)))
+			roleName := strings.TrimSuffix(name, filepath.Ext(name))
+			preview, _ := loadPromptByRole(roleName)
+			roles = append(roles, RoleInfo{Name: roleName, Preview: preview})
 		}
 	}
-	sort.Strings(roles)
+	sort.Slice(roles, func(i, j int) bool { return roles[i].Name < roles[j].Name })
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"roles": roles})
@@ -344,6 +414,30 @@ func loadPromptByRole(role string) (string, error) {
 		return "", fmt.Errorf("prompt role is empty: %s", role)
 	}
 	return prompt, nil
+}
+
+func handleExplainConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var cfg config.Config
+	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		http.Error(w, "Invalid config JSON", http.StatusBadRequest)
+		return
+	}
+	// Automatically auto-detect with defaults based on memory and model
+	cfg.AutoDetectAndCalculate()
+
+	explanation := config.GetConfigExplanation(&cfg)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"explanation": explanation,
+		"concurrency": cfg.Concurrency,
+		"chunk_size":  cfg.MaxChunkSize,
+		"retries":     cfg.MaxRetries,
+	})
 }
 
 // Background Task Runner
@@ -390,30 +484,15 @@ func runTranslationTask(t *TranslationTask) {
 	sendLog(fmt.Sprintf("文件解析成功。总计抽取到 %d 个待翻译文本块段。", t.Total), "green")
 	sendLog("启动翻译引擎...", "gray")
 
-	if t.Config.Concurrency <= 0 {
-		sendLog("正在探测底层硬件配置与模型占用...", "gray")
-		info, err := config.AutoCalculateConcurrency(t.Config.APIURL, t.Config.Model)
-		if err != nil {
-			sendLog(fmt.Sprintf("⚠️ 硬件探测失败 (%v), 强制降级并发至 1", err), "orange")
-			t.Config.Concurrency = 1
+	if t.Config.SystemInfoMsg != "" {
+		sendLog(t.Config.SystemInfoMsg, "gray")
+	}
+	if t.Config.SystemWarning != "" {
+		if strings.Contains(t.Config.SystemWarning, "✅") {
+			sendLog(t.Config.SystemWarning, "green")
 		} else {
-			t.Config.Concurrency = info.RecommendedC
-			sendLog(fmt.Sprintf("[配置检测] 物理内存=%dGB，模型估算占用=%dGB", info.TotalRAMBytes/(1024*1024*1024), info.ModelSize/(1024*1024*1024)), "gray")
-			sendLog(fmt.Sprintf("[智能规划] 建议并发=%d（安全系数已加入）", info.RecommendedC), "green")
-			if info.WarningMsg != "" {
-				if strings.Contains(info.WarningMsg, "✅") {
-					sendLog(info.WarningMsg, "green")
-				} else {
-					sendLog(info.WarningMsg, "orange")
-				}
-			}
+			sendLog("⚠️ "+t.Config.SystemWarning, "orange")
 		}
-	}
-	if t.Config.MaxChunkSize <= 0 {
-		t.Config.MaxChunkSize = config.AutoCalculateMaxChunkSize(t.Config.Model)
-	}
-	if t.Config.MaxRetries <= 0 {
-		t.Config.MaxRetries = 5
 	}
 
 	tr := translator.New(t.Config)
@@ -421,7 +500,7 @@ func runTranslationTask(t *TranslationTask) {
 
 	sendLog(fmt.Sprintf("引擎已并发启动 (Concurrency = %d). 请耐心等待...", t.Config.Concurrency), "gray")
 
-	translatedBlocks, err := proc.Process(blocks, func(current, total int, msg string) {
+	translatedBlocks, stats, err := proc.Process(blocks, func(current, total int, msg string) {
 		t.Total = total
 		if current >= 0 {
 			t.Current = current
@@ -458,7 +537,9 @@ func runTranslationTask(t *TranslationTask) {
 		return
 	}
 
+	t.Stats = stats
 	t.Status = "completed"
+	sendLog(fmt.Sprintf("📊 翻译统计: 成功=%d 术语降级=%d 拒答=%d 完全失败=%d", stats.SuccessCount, stats.FallbackCount, stats.RefusedCount, stats.FailureCount), "gray")
 	sendLog("🎉 生成最终电子书/文档成功！", "green")
 	elapsed := time.Since(startTime)
 	sendLog(fmt.Sprintf("⏱️ 翻译总耗时: %s", formatDuration(elapsed)), "green")

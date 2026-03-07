@@ -22,7 +22,7 @@ func TestTranslator_ShortTextFallback(t *testing.T) {
 	defer server.Close()
 
 	cfg := &config.Config{
-		Model: "translategemma:12b",
+		Model:             "translategemma:12b",
 		APIURL:            server.URL,
 		RequestTimeoutSec: 10,
 		MaxRetries:        1,
@@ -33,7 +33,7 @@ func TestTranslator_ShortTextFallback(t *testing.T) {
 	tr := translator.New(cfg)
 
 	// Sub-test 1: Short text exists in glossary
-	res, err := tr.Translate("Portadilla")
+	res, _, err := tr.Translate("Portadilla")
 	if err != nil {
 		t.Fatalf("Expected no error, got %v", err)
 	}
@@ -42,7 +42,7 @@ func TestTranslator_ShortTextFallback(t *testing.T) {
 	}
 
 	// Sub-test 2: Extremely short text not in glossary (fallback to original text)
-	res2, err := tr.Translate("Xyz")
+	res2, _, err := tr.Translate("Xyz")
 	if err != nil {
 		t.Fatalf("Expected no error, got %v", err)
 	}
@@ -68,7 +68,7 @@ func TestTranslator_ModelRefusalIntercept(t *testing.T) {
 	defer server.Close()
 
 	cfg := &config.Config{
-		Model: "translategemma:12b",
+		Model:             "translategemma:12b",
 		APIURL:            server.URL,
 		RequestTimeoutSec: 10,
 		MaxRetries:        1,
@@ -76,7 +76,7 @@ func TestTranslator_ModelRefusalIntercept(t *testing.T) {
 	tr := translator.New(cfg)
 
 	originalText := "Weird isolated phrase"
-	res, err := tr.Translate(originalText)
+	res, _, err := tr.Translate(originalText)
 	if err == nil {
 		t.Fatalf("Expected error due to model refusal, but got nil")
 	}
@@ -120,7 +120,7 @@ func TestChunkAggregation_ShortTexts(t *testing.T) {
 	cfg := &config.Config{
 		MaxChunkSize:      1000,
 		APIURL:            server.URL,
-		Model: "translategemma:12b",
+		Model:             "translategemma:12b",
 		RequestTimeoutSec: 10,
 		MaxRetries:        1,
 		Concurrency:       1,
@@ -135,7 +135,7 @@ func TestChunkAggregation_ShortTexts(t *testing.T) {
 		{ID: "ch1.html_node_3", OriginalText: "This is a long sentence that should not be merged because it's long enough. It actually has some meat to it."},
 	}
 
-	translated, err := proc.Process(blocks, nil)
+	translated, _, err := proc.Process(blocks, nil)
 	if err != nil {
 		t.Fatalf("Process error: %v", err)
 	}

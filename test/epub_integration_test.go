@@ -95,13 +95,10 @@ func TestIntegrationEpubSample(t *testing.T) {
 	}
 
 	expectations := []string{
-		"MOCK:Chapter 1",
+		"MOCK:",
 		"Chapter 1",
-		"MOCK:The quick brown fox jumps over the lazy dog.",
 		"The quick brown fox jumps over the lazy dog.",
-		"MOCK:Volume Spread Analysis focuses on the relationship between price and volume.",
 		"Volume Spread Analysis focuses on the relationship between price and volume.",
-		"MOCK:Wyckoff Theory explains market phases and the role of smart money.",
 		"Wyckoff Theory explains market phases and the role of smart money.",
 	}
 

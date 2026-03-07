@@ -16,6 +16,20 @@ type Processor struct {
 	translator *translator.Translator
 }
 
+type FailedBlockInfo struct {
+	ID           string `json:"id"`
+	OriginalText string `json:"original_text"`
+	Error        string `json:"error"`
+}
+
+type TranslationStats struct {
+	SuccessCount  int               `json:"success_count"`
+	FallbackCount int               `json:"fallback_count"`
+	RefusedCount  int               `json:"refused_count"`
+	FailureCount  int               `json:"failure_count"`
+	FailedBlocks  []FailedBlockInfo `json:"failed_blocks,omitempty"`
+}
+
 func New(cfg *config.Config, tr *translator.Translator) *Processor {
 	return &Processor{
 		cfg:        cfg,
@@ -29,6 +43,7 @@ type SubChunk struct {
 	SubIndex   int
 	Text       string
 	Translated string
+	Status     translator.TranslationStatus
 	Err        error
 }
 
@@ -42,7 +57,9 @@ func getFilePrefix(id string) string {
 }
 
 // Process handles chunking, concurrent translation, and reassembly.
-func (p *Processor) Process(blocks []parser.TextBlock, onProgress func(int, int, string)) ([]parser.TranslatedBlock, error) {
+func (p *Processor) Process(blocks []parser.TextBlock, onProgress func(int, int, string)) ([]parser.TranslatedBlock, TranslationStats, error) {
+	var stats TranslationStats
+
 	// 0. Pre-processing (Context Aggregation for short texts)
 	var mergedBlocks []parser.TextBlock
 	skipMap := make(map[string]bool)
@@ -110,12 +127,13 @@ func (p *Processor) Process(blocks []parser.TextBlock, onProgress func(int, int,
 		go func() {
 			defer wg.Done()
 			for j := range jobs {
-				translated, err := p.translator.Translate(subChunks[j].Text, func(msg string) {
+				translated, status, err := p.translator.Translate(subChunks[j].Text, func(msg string) {
 					if onProgress != nil {
 						onProgress(-1, totalJobs, fmt.Sprintf("[块 %s-%d] %s", subChunks[j].BlockID, subChunks[j].SubIndex, msg))
 					}
 				})
 				subChunks[j].Translated = translated
+				subChunks[j].Status = status
 				subChunks[j].Err = err
 				results <- j
 			}
@@ -138,19 +156,48 @@ func (p *Processor) Process(blocks []parser.TextBlock, onProgress func(int, int,
 	completedCount := 0
 	for j := range results {
 		completedCount++
+		sc := subChunks[j]
 		if onProgress != nil {
 			var msg string
-			if subChunks[j].Err == nil {
-				preview := strings.ReplaceAll(subChunks[j].Translated, "\n", " ")
+			if sc.Err == nil {
+				preview := strings.ReplaceAll(sc.Translated, "\n", " ")
 				runes := []rune(preview)
 				if len(runes) > 60 {
 					preview = string(runes[:57]) + "..."
 				}
-				msg = fmt.Sprintf("✅ [分块 %s-%d] 完成: %s", subChunks[j].BlockID, subChunks[j].SubIndex, preview)
+				msg = fmt.Sprintf("✅ [分块 %s-%d] 完成: %s", sc.BlockID, sc.SubIndex, preview)
 			} else {
-				msg = fmt.Sprintf("❌ [分块 %s-%d] 翻译完全失败，准备降级容错。", subChunks[j].BlockID, subChunks[j].SubIndex)
+				msg = fmt.Sprintf("❌ [分块 %s-%d] 翻译完全失败，准备降级容错。", sc.BlockID, sc.SubIndex)
 			}
 			onProgress(completedCount, totalJobs, msg)
+		}
+
+		// Update stats
+		switch sc.Status {
+		case translator.StatusSuccess:
+			stats.SuccessCount++
+		case translator.StatusFallback:
+			stats.FallbackCount++
+		case translator.StatusRefused:
+			stats.RefusedCount++
+			stats.FailedBlocks = append(stats.FailedBlocks, FailedBlockInfo{
+				ID:           fmt.Sprintf("%s-%d", sc.BlockID, sc.SubIndex),
+				OriginalText: sc.Text,
+				Error:        sc.Err.Error(),
+			})
+		case translator.StatusFailed:
+			stats.FailureCount++
+			errText := "unknown error"
+			if sc.Err != nil {
+				errText = sc.Err.Error()
+			}
+			stats.FailedBlocks = append(stats.FailedBlocks, FailedBlockInfo{
+				ID:           fmt.Sprintf("%s-%d", sc.BlockID, sc.SubIndex),
+				OriginalText: sc.Text,
+				Error:        errText,
+			})
+		case translator.StatusSkip:
+			// skipped empty chunk, don't count
 		}
 	}
 
@@ -200,7 +247,7 @@ func (p *Processor) Process(blocks []parser.TextBlock, onProgress func(int, int,
 		})
 	}
 
-	return translatedBlocks, nil
+	return translatedBlocks, stats, nil
 }
 
 func (p *Processor) splitText(text string) []string {

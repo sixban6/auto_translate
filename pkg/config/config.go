@@ -17,7 +17,7 @@ type Config struct {
 	Concurrency       int               `json:"concurrency"`         // Number of concurrent translations, e.g. 2
 	Temperature       float64           `json:"temperature"`         // Translation temperature, e.g. 0.1
 	MaxChunkSize      int               `json:"max_chunk_size"`      // Max length of chunk text
-	MaxRetries        int               `json:"max_retries"`          // Max retry attempts per chunk
+	MaxRetries        int               `json:"max_retries"`         // Max retry attempts per chunk
 	RequestTimeoutSec int               `json:"request_timeout_sec"` // HTTP timeout in seconds
 	InputFile         string            `json:"input_file"`          // Path to input file (.txt, .epub)
 	OutputFile        string            `json:"output_file"`         // Path to save output file
@@ -56,18 +56,28 @@ func Load(path string) (*Config, error) {
 	}
 
 	// Set defaults if missing
+	cfg.AutoDetectAndCalculate()
+
+	return &cfg, nil
+}
+
+// AutoDetectAndCalculate populates the config with default calculated values based on current environment and model.
+func (cfg *Config) AutoDetectAndCalculate() {
 	if cfg.Concurrency <= 0 {
 		info, err := AutoCalculateConcurrency(cfg.APIURL, cfg.Model)
 		if err != nil {
 			// fallback
 			cfg.Concurrency = 1
+			cfg.SystemInfoMsg = fmt.Sprintf("[配置检测] 未知配置。建议并发数：%d。", cfg.Concurrency)
 		} else {
 			cfg.Concurrency = info.RecommendedC
 			if info.WarningMsg != "" {
 				cfg.SystemWarning = info.WarningMsg
 			}
-			cfg.SystemInfoMsg = fmt.Sprintf("[配置检测] 探测到物理内存 %dGB，模型估算基础占用 %dGB。 [智能规划] 建议并发=%d（安全系数已加入）。", info.TotalRAMBytes/(1024*1024*1024), info.ModelSize/(1024*1024*1024), info.RecommendedC)
+			cfg.SystemInfoMsg = fmt.Sprintf("[配置检测] 探测到物理内存 %dGB，模型估算基础占用 %dGB。 [智能规划] 建议并发数：%d（安全系数已加入）。", info.TotalRAMBytes/(1024*1024*1024), info.ModelSize/(1024*1024*1024), info.RecommendedC)
 		}
+	} else if cfg.SystemInfoMsg == "" {
+		cfg.SystemInfoMsg = fmt.Sprintf("[配置检测] 用户指定并发数：%d。", cfg.Concurrency)
 	}
 
 	if cfg.Temperature <= 0 {
@@ -82,8 +92,17 @@ func Load(path string) (*Config, error) {
 	if cfg.RequestTimeoutSec <= 0 {
 		cfg.RequestTimeoutSec = 180
 	}
+}
 
-	return &cfg, nil
+// GetConfigExplanation generates a human-readable explanation of the current translation strategy.
+func GetConfigExplanation(cfg *Config) string {
+	var sb strings.Builder
+	sb.WriteString(cfg.SystemInfoMsg)
+	sb.WriteString(fmt.Sprintf("\n[当前策略] 模型=%s | 块大小=%d | 重试=%d | 超时=%ds", cfg.Model, cfg.MaxChunkSize, cfg.MaxRetries, cfg.RequestTimeoutSec))
+	if cfg.SystemWarning != "" {
+		sb.WriteString("\n[运行警告] " + cfg.SystemWarning)
+	}
+	return sb.String()
 }
 
 func AutoCalculateMaxChunkSize(modelName string) int {

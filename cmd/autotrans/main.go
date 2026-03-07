@@ -61,13 +61,15 @@ func main() {
 	log.Printf("Starting translation with concurrency %d...", cfg.Concurrency)
 	startTime := time.Now()
 
-	translatedBlocks, err := proc.Process(blocks, func(current, total int, msg string) {
+	translatedBlocks, stats, err := proc.Process(blocks, func(current, total int, msg string) {
 		if msg != "" {
 			log.Println(msg)
 		} else if current%10 == 0 || current == total {
 			log.Printf("Progress: %d/%d (%.1f%%)", current, total, float64(current)/float64(total)*100)
 		}
 	})
+
+	log.Printf("翻译统计: 成功=%d 词汇替换/短文本=%d 拒答拦截=%d 完全失败=%d", stats.SuccessCount, stats.FallbackCount, stats.RefusedCount, stats.FailureCount)
 	if err != nil {
 		log.Fatalf("Translation failed: %v", err)
 	}

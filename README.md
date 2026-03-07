@@ -7,9 +7,14 @@
 ### 1. 环境要求
 
 - Go 1.22+
-- 本地或远程 OpenAI 兼容接口（推荐 Ollama）
+- Ollama
 
 ### 2. 启动 WebUI
+
+安装translategemma:12b
+```bash
+ollama pull translategemma:12b
+```
 
 在项目根目录执行：
 
@@ -17,11 +22,15 @@
 go run ./cmd/webrunner/main.go
 ```
 
-启动成功后打开浏览器访问：
+启动成功后打开浏览器访问：输出的地址
 
 ```
-http://localhost:4000
+> $ go run cmd/webrunner/main.go                                                                                                                      [±main ●●●]
+Web server is running beautifully at http://localhost:4002
+
 ```
+
+![img.png](img.png)
 
 ### 3. 使用流程
 

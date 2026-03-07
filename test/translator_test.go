@@ -66,7 +66,7 @@ func TestTranslator(t *testing.T) {
 
 	cfg := &config.Config{
 		APIURL:            server.URL,
-		Model: "translategemma:12b",
+		Model:             "translategemma:12b",
 		Prompt:            "test prompt",
 		Glossary:          map[string]string{"Demand": "需求(强制)"},
 		Temperature:       0.1,
@@ -76,7 +76,7 @@ func TestTranslator(t *testing.T) {
 	tr := translator.New(cfg)
 
 	// Test 1: Empty text
-	res, err := tr.Translate("   ")
+	res, _, err := tr.Translate("   ")
 	if err != nil {
 		t.Fatalf("Translate error: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestTranslator(t *testing.T) {
 
 	// Test 2: Standard text, verify retry (requestCount should be 2 now) and cleanup
 	eventCalled := false
-	res, err = tr.Translate("Just some text", func(msg string) {
+	res, _, err = tr.Translate("Just some text", func(msg string) {
 		eventCalled = true
 		if !strings.Contains(msg, "Retrying") {
 			t.Errorf("Expected retry message, got %s", msg)
@@ -106,7 +106,7 @@ func TestTranslator(t *testing.T) {
 	}
 
 	// Test 3: Glossary check
-	res, err = tr.Translate("Test Demand")
+	res, _, err = tr.Translate("Test Demand")
 	if err != nil {
 		t.Fatalf("Translate error: %v", err)
 	}

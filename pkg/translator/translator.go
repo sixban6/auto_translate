@@ -12,6 +12,16 @@ import (
 	"auto_translate/pkg/config"
 )
 
+type TranslationStatus string
+
+const (
+	StatusSuccess  TranslationStatus = "success"
+	StatusFallback TranslationStatus = "fallback"
+	StatusRefused  TranslationStatus = "refused"
+	StatusFailed   TranslationStatus = "failed"
+	StatusSkip     TranslationStatus = "skip"
+)
+
 // Translator handles HTTP requests to the Ollama API and glossary enforcement.
 type Translator struct {
 	cfg    *config.Config
@@ -30,9 +40,9 @@ func New(cfg *config.Config) *Translator {
 
 // Translate attempts to translate a given text snippet via the API.
 // Implements retries and handles glossary mapping.
-func (t *Translator) Translate(text string, onEvent ...func(string)) (string, error) {
+func (t *Translator) Translate(text string, onEvent ...func(string)) (string, TranslationStatus, error) {
 	if strings.TrimSpace(text) == "" {
-		return "", nil // skip empty chunks
+		return "", StatusSkip, nil // skip empty chunks
 	}
 
 	var ev func(string)
@@ -47,12 +57,12 @@ func (t *Translator) Translate(text string, onEvent ...func(string)) (string, er
 		// Priority 1: Check Glossary for exact match
 		for en, cn := range t.cfg.Glossary {
 			if strings.EqualFold(textTrimmed, strings.TrimSpace(en)) {
-				return cn, nil
+				return cn, StatusFallback, nil
 			}
 		}
 		// Priority 2: If extremely short and no spaces, return as-is
 		if len(runes) < 5 && !strings.Contains(textTrimmed, " ") {
-			return text, nil // Fallback to original text
+			return text, StatusFallback, nil // Fallback to original text
 		}
 	}
 
@@ -67,7 +77,7 @@ func (t *Translator) Translate(text string, onEvent ...func(string)) (string, er
 
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal payload: %w", err)
+		return "", StatusFailed, fmt.Errorf("failed to marshal payload: %w", err)
 	}
 
 	var translated string
@@ -79,7 +89,7 @@ func (t *Translator) Translate(text string, onEvent ...func(string)) (string, er
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		req, err := http.NewRequest("POST", t.cfg.APIURL, bytes.NewBuffer(jsonData))
 		if err != nil {
-			return "", fmt.Errorf("failed to create request: %w", err)
+			return "", StatusFailed, fmt.Errorf("failed to create request: %w", err)
 		}
 		req.Header.Set("Content-Type", "application/json")
 
@@ -107,7 +117,7 @@ func (t *Translator) Translate(text string, onEvent ...func(string)) (string, er
 
 		if err != nil {
 			if attempt == maxRetries {
-				return "", fmt.Errorf("API request failed after %d attempts: %w", maxRetries, err)
+				return "", StatusFailed, fmt.Errorf("API request failed after %d attempts: %w", maxRetries, err)
 			}
 			if ev != nil {
 				ev(fmt.Sprintf("API request failed (Attempt %d/%d): %v. Retrying...", attempt, maxRetries, err))
@@ -119,7 +129,7 @@ func (t *Translator) Translate(text string, onEvent ...func(string)) (string, er
 		if resp.StatusCode != http.StatusOK {
 			resp.Body.Close()
 			if attempt == maxRetries {
-				return "", fmt.Errorf("API returned non-200 status %d after %d attempts", resp.StatusCode, maxRetries)
+				return "", StatusFailed, fmt.Errorf("API returned non-200 status %d after %d attempts", resp.StatusCode, maxRetries)
 			}
 			if ev != nil {
 				ev(fmt.Sprintf("API returned status %d (Attempt %d/%d). Retrying...", resp.StatusCode, attempt, maxRetries))
@@ -131,7 +141,7 @@ func (t *Translator) Translate(text string, onEvent ...func(string)) (string, er
 		body, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if err != nil {
-			return "", fmt.Errorf("failed to read API response body: %w", err)
+			return "", StatusFailed, fmt.Errorf("failed to read API response body: %w", err)
 		}
 
 		// Parse the OpenAI compatible response
@@ -144,7 +154,7 @@ func (t *Translator) Translate(text string, onEvent ...func(string)) (string, er
 		}
 
 		if err := json.Unmarshal(body, &result); err != nil {
-			return "", fmt.Errorf("failed to decode API response JSON: %w (body: %s)", err, string(body))
+			return "", StatusFailed, fmt.Errorf("failed to decode API response JSON: %w (body: %s)", err, string(body))
 		}
 
 		if len(result.Choices) > 0 {
@@ -156,12 +166,12 @@ func (t *Translator) Translate(text string, onEvent ...func(string)) (string, er
 				strings.Contains(translated, "未提供上下文") ||
 				strings.Contains(translated, "没有任何内容") ||
 				strings.Contains(translated, "请提供包含") {
-				return text, fmt.Errorf("model refused to translate (fallback to original): %s", translated)
+				return text, StatusRefused, fmt.Errorf("model refused to translate (fallback to original): %s", translated)
 			}
 
 			break // success!
 		} else {
-			return "", fmt.Errorf("API returned empty choices array")
+			return "", StatusFailed, fmt.Errorf("API returned empty choices array")
 		}
 	}
 
@@ -205,5 +215,5 @@ func (t *Translator) Translate(text string, onEvent ...func(string)) (string, er
 		}
 	}
 
-	return translated, nil
+	return translated, StatusSuccess, nil
 }
