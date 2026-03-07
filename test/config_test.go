@@ -11,7 +11,7 @@ func TestConfigLoad(t *testing.T) {
 	// Create a temporary valid config file
 	validJSON := `{
 		"api_url": "http://localhost",
-		"model": "qwen",
+		"model": "qwen2.5:32b",
 		"prompt": "test",
 		"input_file": "in.txt",
 		"output_file": "out.txt",
@@ -29,8 +29,11 @@ func TestConfigLoad(t *testing.T) {
 	if cfg.Concurrency != 1 {
 		t.Errorf("Expected default concurrency 1, got %d", cfg.Concurrency)
 	}
-	if cfg.MaxChunkSize != 600 {
-		t.Errorf("Expected default max_chunk_size 600, got %d", cfg.MaxChunkSize)
+	if cfg.MaxChunkSize != config.AutoCalculateMaxChunkSize(cfg.Model) {
+		t.Errorf("Expected auto max_chunk_size %d, got %d", config.AutoCalculateMaxChunkSize(cfg.Model), cfg.MaxChunkSize)
+	}
+	if cfg.MaxRetries != 5 {
+		t.Errorf("Expected default max_retries 5, got %d", cfg.MaxRetries)
 	}
 	if cfg.RequestTimeoutSec != 180 {
 		t.Errorf("Expected default request_timeout_sec 180, got %d", cfg.RequestTimeoutSec)
@@ -51,5 +54,23 @@ func TestConfigLoad(t *testing.T) {
 	_, err = config.Load(invalidFile)
 	if err == nil {
 		t.Error("Expected error for missing required fields, got nil")
+	}
+}
+
+func TestConfigLoadWithPromptRole(t *testing.T) {
+	validJSON := `{
+		"api_url": "http://localhost",
+		"model": "qwen2.5:32b",
+		"prompt_role": "金融翻译专家",
+		"input_file": "in.txt",
+		"output_file": "out.txt"
+	}`
+	validFile := "test_valid_config_role.json"
+	os.WriteFile(validFile, []byte(validJSON), 0644)
+	defer os.Remove(validFile)
+
+	_, err := config.Load(validFile)
+	if err != nil {
+		t.Fatalf("Failed to load valid config with prompt_role: %v", err)
 	}
 }

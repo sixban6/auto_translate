@@ -55,7 +55,10 @@ func (t *Translator) Translate(text string, onEvent ...func(string)) (string, er
 	}
 
 	var translated string
-	maxRetries := 3
+	maxRetries := t.cfg.MaxRetries
+	if maxRetries <= 0 {
+		maxRetries = 5
+	}
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		req, err := http.NewRequest("POST", t.cfg.APIURL, bytes.NewBuffer(jsonData))

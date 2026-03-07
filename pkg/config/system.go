@@ -196,6 +196,16 @@ func AutoCalculateConcurrency(apiURL, modelName string) (*SystemInfo, error) {
 	}
 
 	recommended := autoCalculateLogic(ram, modSize, runtime.GOOS)
+	cpuCap := runtime.NumCPU() * 2
+	if cpuCap < 1 {
+		cpuCap = 1
+	}
+	if cpuCap > 10 {
+		cpuCap = 10
+	}
+	if recommended > cpuCap {
+		recommended = cpuCap
+	}
 
 	warning := ""
 	if recommended > 1 {

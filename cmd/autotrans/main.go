@@ -2,8 +2,11 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
+	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"auto_translate/pkg/config"
@@ -23,6 +26,13 @@ func main() {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
+	}
+	if cfg.PromptRole != "" {
+		prompt, err := loadPromptByRole(cfg.PromptRole)
+		if err != nil {
+			log.Fatalf("Failed to load prompt role: %v", err)
+		}
+		cfg.Prompt = prompt
 	}
 
 	if cfg.SystemInfoMsg != "" {
@@ -69,4 +79,21 @@ func main() {
 	}
 
 	log.Printf("Success! Output written to %s", cfg.OutputFile)
+}
+
+func loadPromptByRole(role string) (string, error) {
+	cleanRole := filepath.Base(role)
+	if cleanRole == "." || cleanRole == string(filepath.Separator) || cleanRole == "" {
+		return "", fmt.Errorf("invalid prompt_role")
+	}
+	filePath := filepath.Join("prompts", cleanRole+".md")
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return "", fmt.Errorf("prompt role not found: %s", role)
+	}
+	prompt := strings.TrimSpace(string(data))
+	if prompt == "" {
+		return "", fmt.Errorf("prompt role is empty: %s", role)
+	}
+	return prompt, nil
 }

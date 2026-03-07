@@ -14,6 +14,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const modelSelect = document.getElementById('modelSelect');
     const modelInput = document.getElementById('modelInput');
+    const roleSelect = document.getElementById('roleSelect');
 
     modelSelect.addEventListener('change', (e) => {
         if (e.target.value === '__custom__') {
@@ -66,6 +67,31 @@ document.addEventListener('DOMContentLoaded', () => {
     // Initialize models list
     fetchModels();
     document.querySelector('input[name="api_url"]').addEventListener('blur', fetchModels);
+
+    async function fetchRoles() {
+        try {
+            const res = await fetch('/api/roles');
+            if (res.ok) {
+                const data = await res.json();
+                if (data.roles && data.roles.length > 0) {
+                    roleSelect.innerHTML = '';
+                    data.roles.forEach(role => {
+                        const opt = document.createElement('option');
+                        opt.value = role;
+                        opt.textContent = role;
+                        roleSelect.appendChild(opt);
+                    });
+                    if (data.roles.includes('金融翻译专家')) {
+                        roleSelect.value = '金融翻译专家';
+                    }
+                }
+            }
+        } catch (e) {
+            console.warn("Failed to fetch roles", e);
+        }
+    }
+
+    fetchRoles();
 
     // Toast Notification System
     function showToast(message, type = 'info') {
@@ -143,9 +169,10 @@ document.addEventListener('DOMContentLoaded', () => {
         delete config.glossary_text;
 
         // Type conversions
-        config.concurrency = parseInt(config.concurrency);
-        config.max_chunk_size = parseInt(config.max_chunk_size);
+        config.concurrency = 0;
+        config.max_chunk_size = 0;
         config.request_timeout_sec = parseInt(config.request_timeout_sec);
+        config.max_retries = parseInt(config.max_retries);
 
         // Prep API Call
         const apiFormData = new FormData();

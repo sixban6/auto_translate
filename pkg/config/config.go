@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 )
 
 // Config holds the configuration for the auto-translation program.
@@ -11,10 +12,12 @@ type Config struct {
 	APIURL            string            `json:"api_url"`             // e.g. "http://localhost:11434/v1/chat/completions"
 	Model             string            `json:"model"`               // e.g. "qwen2.5:32b"
 	Prompt            string            `json:"prompt"`              // System prompt
+	PromptRole        string            `json:"prompt_role"`         // Role name for system prompt
 	Glossary          map[string]string `json:"glossary"`            // Dictionary of EN -> CN terms
 	Concurrency       int               `json:"concurrency"`         // Number of concurrent translations, e.g. 2
 	Temperature       float64           `json:"temperature"`         // Translation temperature, e.g. 0.1
 	MaxChunkSize      int               `json:"max_chunk_size"`      // Max length of chunk text
+	MaxRetries        int               `json:"max_retries"`          // Max retry attempts per chunk
 	RequestTimeoutSec int               `json:"request_timeout_sec"` // HTTP timeout in seconds
 	InputFile         string            `json:"input_file"`          // Path to input file (.txt, .epub)
 	OutputFile        string            `json:"output_file"`         // Path to save output file
@@ -42,8 +45,8 @@ func Load(path string) (*Config, error) {
 	if cfg.Model == "" {
 		return nil, fmt.Errorf("missing required field: model")
 	}
-	if cfg.Prompt == "" {
-		return nil, fmt.Errorf("missing required field: prompt")
+	if cfg.Prompt == "" && cfg.PromptRole == "" {
+		return nil, fmt.Errorf("missing required field: prompt or prompt_role")
 	}
 	if cfg.InputFile == "" {
 		return nil, fmt.Errorf("missing required field: input_file")
@@ -71,11 +74,32 @@ func Load(path string) (*Config, error) {
 		cfg.Temperature = 0.1
 	}
 	if cfg.MaxChunkSize <= 0 {
-		cfg.MaxChunkSize = 600
+		cfg.MaxChunkSize = AutoCalculateMaxChunkSize(cfg.Model)
+	}
+	if cfg.MaxRetries <= 0 {
+		cfg.MaxRetries = 5
 	}
 	if cfg.RequestTimeoutSec <= 0 {
 		cfg.RequestTimeoutSec = 180
 	}
 
 	return &cfg, nil
+}
+
+func AutoCalculateMaxChunkSize(modelName string) int {
+	model := strings.ToLower(modelName)
+	size := 800
+	switch {
+	case strings.Contains(model, "qwen2.5"):
+		size = 1100
+	case strings.Contains(model, "llama3"):
+		size = 1100
+	}
+	if size < 400 {
+		return 400
+	}
+	if size > 1400 {
+		return 1400
+	}
+	return size
 }

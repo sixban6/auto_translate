@@ -1,153 +1,218 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="zh-CN">
-
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Auto-Translator - 沉浸式本地翻译舱</title>
-    <link rel="stylesheet" href="/static/style.css">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-</head>
+    <link rel="stylesheet" href="/static/style.css" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+  </head>
 
-<body>
+  <body>
     <div class="app-container">
-        <!-- Sidebar -->
-        <aside class="sidebar">
-            <div class="logo-area">
-                <svg class="logo-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <path d="M12 2L2 7L12 12L22 7L12 2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                        stroke-linejoin="round" />
-                    <path d="M2 17L12 22L22 17" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                        stroke-linejoin="round" />
-                    <path d="M2 12L12 17L22 12" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                        stroke-linejoin="round" />
-                </svg>
-                <div class="logo-text">Auto-Trans</div>
+      <!-- Sidebar -->
+      <aside class="sidebar">
+        <div class="logo-area">
+          <svg
+            class="logo-icon"
+            viewBox="0 0 24 24"
+            fill="none"
+            xmlns="http://www.w3.org/2000/svg"
+          >
+            <path
+              d="M12 2L2 7L12 12L22 7L12 2Z"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+            <path
+              d="M2 17L12 22L22 17"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+            <path
+              d="M2 12L12 17L22 12"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+          <div class="logo-text">Auto-Trans</div>
+        </div>
+
+        <form id="configForm" class="config-form">
+          <div class="form-section">
+            <div class="section-title">模型与接口</div>
+            <div class="form-group">
+              <label>本地模型 (Ollama)</label>
+              <select id="modelSelect" class="select-input">
+                <option value="qwen2.5:32b">加载中...</option>
+              </select>
+              <input
+                type="text"
+                name="model"
+                id="modelInput"
+                value="qwen2.5:32b"
+                class="select-input"
+                style="display: none; margin-top: 8px"
+                placeholder="请输入模型名称"
+                required
+              />
             </div>
+            <div class="form-group">
+              <label>请求地址 (API URL)</label>
+              <input
+                type="text"
+                name="api_url"
+                value="http://localhost:11434/v1/chat/completions"
+                required
+              />
+            </div>
+          </div>
 
-            <form id="configForm" class="config-form">
-                <div class="form-section">
-                    <div class="section-title">模型与接口</div>
-                    <div class="form-group">
-                        <label>本地模型 (Ollama)</label>
-                        <select id="modelSelect" class="select-input">
-                            <option value="qwen2.5:32b">加载中...</option>
-                        </select>
-                        <input type="text" name="model" id="modelInput" value="qwen2.5:32b" class="select-input"
-                            style="display: none; margin-top: 8px;" placeholder="请输入模型名称" required>
-                    </div>
-                    <div class="form-group">
-                        <label>请求地址 (API URL)</label>
-                        <input type="text" name="api_url" value="http://localhost:11434/v1/chat/completions" required>
-                    </div>
-                </div>
+          <div class="form-section">
+            <div class="section-title">翻译参数</div>
+            <div class="form-group">
+              <label>翻译专家角色</label>
+              <select id="roleSelect" name="prompt_role" class="select-input">
+                <option value="金融翻译专家">加载中...</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>重试超时(秒)</label>
+              <input
+                type="number"
+                name="request_timeout_sec"
+                value="180"
+                min="5"
+              />
+            </div>
+            <div class="form-group">
+              <label>重试次数</label>
+              <input
+                type="number"
+                name="max_retries"
+                value="5"
+                min="1"
+                max="20"
+              />
+            </div>
+          </div>
 
-                <div class="form-section">
-                    <div class="section-title">翻译参数</div>
-                    <div class="form-group">
-                        <label>系统设定词 (System Prompt)</label>
-                        <textarea name="prompt" rows="4" required>You are a professional financial translator specializing in VSA (Volume Spread Analysis) and Wyckoff Theory.
-Translate the given text into concise, professional Chinese suitable for senior traders.
-CRITICAL: Output ONLY the translated Chinese text. No markdown, no explanations, no original text.</textarea>
-                    </div>
-                    <div class="form-group">
-                        <label title="设为 0 开启带硬件嗅探的智能并发">并发限制 (0=智能)</label>
-                        <input type="number" name="concurrency" value="0" min="0" max="10">
-                    </div>
-                    <div class="form-group">
-                        <label>块大小 (建议500-800)</label>
-                        <input type="number" name="max_chunk_size" value="600" min="50">
-                    </div>
-                    <div class="form-group">
-                        <label>重试超时(秒)</label>
-                        <input type="number" name="request_timeout_sec" value="180" min="5">
-                    </div>
-                </div>
-
-                <div class="form-section">
-                    <div class="section-title">术语与输出</div>
-                    <div class="form-group">
-                        <label>术语表 (Glossary: 英文=中文)</label>
-                        <textarea name="glossary_text" rows="5" placeholder="例如:\nDemand=需求\nSupply=供应">Ventas=抛压
+          <div class="form-section">
+            <div class="section-title">术语与输出</div>
+            <div class="form-group">
+              <label>术语表 (Glossary: 英文=中文)</label>
+              <textarea
+                name="glossary_text"
+                rows="5"
+                placeholder="例如:\nDemand=需求\nSupply=供应"
+              >
+Ventas=抛压
 Selling=抛压
 Compras=买盘
 Buying=买盘
 El camino de menor resistencia=阻力最小路径
 Supply=供应
-Demand=需求</textarea>
-                    </div>
-                    <div class="form-group toggle-group">
-                        <label>双语对照模式</label>
-                        <label class="switch">
-                            <input type="checkbox" name="bilingual" checked>
-                            <span class="slider round"></span>
-                        </label>
-                    </div>
-                </div>
-            </form>
-        </aside>
-
-        <!-- Main Content -->
-        <main class="main-content">
-            <header class="top-bar">
-                <h1>沉浸式本地翻译引擎</h1>
-                <p>完全零成本，基于你本地的显卡算力翻译数十万字的小说或专业文献。</p>
-            </header>
-
-            <div class="workspace">
-                <div class="upload-zone" id="uploadZone">
-                    <div class="upload-icon">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                            <polyline points="17 8 12 3 7 8"></polyline>
-                            <line x1="12" y1="3" x2="12" y2="15"></line>
-                        </svg>
-                    </div>
-                    <h2>上传你需要翻译的文件</h2>
-                    <p>支持 <strong>.epub</strong> 格式（保持原定排版注入双语）或 <strong>.txt</strong> 格式。</p>
-                    <button class="btn-primary mt-4"
-                        onclick="document.getElementById('fileInput').click()">选择文件</button>
-                    <input type="file" id="fileInput" hidden accept=".epub,.txt">
-                    <div id="selectedFileName" class="mt-2 text-sm text-gray"></div>
-                </div>
-
-                <!-- Progress Dashboard (Hidden initially) -->
-                <div class="dashboard hidden" id="dashboard">
-                    <div class="status-card">
-                        <div class="flex-between">
-                            <h3 id="taskTitle">正在翻译: book.epub</h3>
-                            <span class="badge" id="statusBadge">进行中</span>
-                        </div>
-
-                        <div class="progress-wrapper">
-                            <div class="progress-bar">
-                                <div class="progress-fill" id="progressFill" style="width: 0%"></div>
-                            </div>
-                            <div class="flex-between progress-stats">
-                                <span id="progressPercent">0%</span>
-                                <span id="progressText">0 / 0 块</span>
-                            </div>
-                        </div>
-
-                        <div class="terminal-log" id="terminalLog">
-                            <!-- Logs injected here -->
-                            <div class="log-line text-green">> 翻译引擎已就绪...</div>
-                        </div>
-
-                        <div class="actions mt-4 flex justify-end">
-                            <button class="btn-secondary hidden" id="downloadBtn">下载译本</button>
-                            <button class="btn-primary" id="startBtn">开始执行翻译</button>
-                        </div>
-                    </div>
-                </div>
+Demand=需求</textarea
+              >
             </div>
-        </main>
+            <div class="form-group toggle-group">
+              <label>双语对照模式</label>
+              <label class="switch">
+                <input type="checkbox" name="bilingual" checked />
+                <span class="slider round"></span>
+              </label>
+            </div>
+          </div>
+        </form>
+      </aside>
+
+      <!-- Main Content -->
+      <main class="main-content">
+        <header class="top-bar">
+          <h1>沉浸式本地翻译引擎</h1>
+          <p>完全零成本，基于你本地的显卡算力翻译数十万字的小说或专业文献。</p>
+        </header>
+
+        <div class="workspace">
+          <div class="upload-zone" id="uploadZone">
+            <div class="upload-icon">
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+              >
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="17 8 12 3 7 8"></polyline>
+                <line x1="12" y1="3" x2="12" y2="15"></line>
+              </svg>
+            </div>
+            <h2>上传你需要翻译的文件</h2>
+            <p>
+              支持 <strong>.epub</strong> 格式（保持原定排版注入双语）或
+              <strong>.txt</strong> 格式。
+            </p>
+            <button
+              class="btn-primary mt-4"
+              onclick="document.getElementById('fileInput').click()"
+            >
+              选择文件
+            </button>
+            <input type="file" id="fileInput" hidden accept=".epub,.txt" />
+            <div id="selectedFileName" class="mt-2 text-sm text-gray"></div>
+          </div>
+
+          <!-- Progress Dashboard (Hidden initially) -->
+          <div class="dashboard hidden" id="dashboard">
+            <div class="status-card">
+              <div class="flex-between">
+                <h3 id="taskTitle">正在翻译: book.epub</h3>
+                <span class="badge" id="statusBadge">进行中</span>
+              </div>
+
+              <div class="progress-wrapper">
+                <div class="progress-bar">
+                  <div
+                    class="progress-fill"
+                    id="progressFill"
+                    style="width: 0%"
+                  ></div>
+                </div>
+                <div class="flex-between progress-stats">
+                  <span id="progressPercent">0%</span>
+                  <span id="progressText">0 / 0 块</span>
+                </div>
+              </div>
+
+              <div class="terminal-log" id="terminalLog">
+                <!-- Logs injected here -->
+                <div class="log-line text-green">> 翻译引擎已就绪...</div>
+              </div>
+
+              <div class="actions mt-4 flex justify-end">
+                <button class="btn-secondary hidden" id="downloadBtn">
+                  下载译本
+                </button>
+                <button class="btn-primary" id="startBtn">开始执行翻译</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </main>
     </div>
 
     <!-- Modals & Overlays -->
     <div class="toast-container" id="toastContainer"></div>
 
     <script src="/static/app.js"></script>
-</body>
-
+  </body>
 </html>

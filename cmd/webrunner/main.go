@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -70,6 +71,8 @@ func main() {
 
 	// API Endpoint: Download Final File
 	http.HandleFunc("/api/download", handleDownload)
+	// API Endpoint: Load Roles
+	http.HandleFunc("/api/roles", handleRoles)
 
 	port := ":4000"
 	fmt.Printf("Web server is running beautifully at http://localhost%s\n", port)
@@ -92,6 +95,18 @@ func handleTranslateStart(w http.ResponseWriter, r *http.Request) {
 	var cfg config.Config
 	if err := json.Unmarshal([]byte(configFileStr), &cfg); err != nil {
 		http.Error(w, "Invalid config JSON", http.StatusBadRequest)
+		return
+	}
+	if cfg.PromptRole != "" {
+		prompt, err := loadPromptByRole(cfg.PromptRole)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		cfg.Prompt = prompt
+	}
+	if cfg.Prompt == "" {
+		http.Error(w, "Missing prompt or prompt_role", http.StatusBadRequest)
 		return
 	}
 
@@ -251,6 +266,46 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{"models": models})
 }
 
+func handleRoles(w http.ResponseWriter, r *http.Request) {
+	entries, err := os.ReadDir("prompts")
+	if err != nil {
+		http.Error(w, "Failed to read prompts directory", http.StatusInternalServerError)
+		return
+	}
+
+	roles := make([]string, 0)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if strings.HasSuffix(strings.ToLower(name), ".md") {
+			roles = append(roles, strings.TrimSuffix(name, filepath.Ext(name)))
+		}
+	}
+	sort.Strings(roles)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"roles": roles})
+}
+
+func loadPromptByRole(role string) (string, error) {
+	cleanRole := filepath.Base(role)
+	if cleanRole == "." || cleanRole == string(filepath.Separator) || cleanRole == "" {
+		return "", fmt.Errorf("invalid prompt_role")
+	}
+	filePath := filepath.Join("prompts", cleanRole+".md")
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return "", fmt.Errorf("prompt role not found: %s", role)
+	}
+	prompt := strings.TrimSpace(string(data))
+	if prompt == "" {
+		return "", fmt.Errorf("prompt role is empty: %s", role)
+	}
+	return prompt, nil
+}
+
 // Background Task Runner
 func runTranslationTask(t *TranslationTask) {
 	defer close(t.MessageCh)
@@ -275,6 +330,7 @@ func runTranslationTask(t *TranslationTask) {
 		}
 	}
 
+	startTime := time.Now()
 	ext := filepath.Ext(t.Config.InputFile)
 	p, err := parser.GetParser(ext)
 	if err != nil {
@@ -312,6 +368,12 @@ func runTranslationTask(t *TranslationTask) {
 				}
 			}
 		}
+	}
+	if t.Config.MaxChunkSize <= 0 {
+		t.Config.MaxChunkSize = config.AutoCalculateMaxChunkSize(t.Config.Model)
+	}
+	if t.Config.MaxRetries <= 0 {
+		t.Config.MaxRetries = 5
 	}
 
 	tr := translator.New(t.Config)
@@ -358,10 +420,27 @@ func runTranslationTask(t *TranslationTask) {
 
 	t.Status = "completed"
 	sendLog("🎉 生成最终电子书/文档成功！", "green")
+	elapsed := time.Since(startTime)
+	sendLog(fmt.Sprintf("⏱️ 翻译总耗时: %s", formatDuration(elapsed)), "green")
 
 	t.MessageCh <- LogMsg{
 		Status:  "completed",
 		Total:   t.Total,
 		Current: t.Total,
 	}
+}
+
+func formatDuration(d time.Duration) string {
+	totalSeconds := int(d.Seconds())
+	if totalSeconds < 60 {
+		return fmt.Sprintf("%ds", totalSeconds)
+	}
+	mins := totalSeconds / 60
+	secs := totalSeconds % 60
+	if mins < 60 {
+		return fmt.Sprintf("%dm%ds", mins, secs)
+	}
+	hours := mins / 60
+	mins = mins % 60
+	return fmt.Sprintf("%dh%dm%ds", hours, mins, secs)
 }
