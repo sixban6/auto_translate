@@ -1,0 +1,21 @@
+{
+  "api_url": "http://localhost:11434/v1/chat/completions",
+  "model": "qwen2.5:32b",
+  "prompt": "You are a professional financial translator specializing in VSA (Volume Spread Analysis) and Wyckoff Theory.\nTranslate the given text into concise, professional Chinese suitable for senior traders.\nCRITICAL: Output ONLY the translated Chinese text. No markdown, no explanations, no original text.",
+  "glossary": {
+    "Ventas": "抛压",
+    "Selling": "抛压",
+    "Compras": "买盘",
+    "Buying": "买盘",
+    "El camino de menor resistencia": "阻力最小路径",
+    "Supply": "供应",
+    "Demand": "需求"
+  },
+  "concurrency": 2,
+  "temperature": 0.1,
+  "max_chunk_size": 2000,
+  "request_timeout_sec": 300,
+  "input_file": "./input.txt",
+  "output_file": "./output.txt",
+  "bilingual": true
+}
