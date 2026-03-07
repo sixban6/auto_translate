@@ -48,7 +48,7 @@ func TestProcessor(t *testing.T) {
 
 	cfg := &config.Config{
 		APIURL:            server.URL,
-		Model:             "test",
+		Model: "translategemma:12b",
 		MaxChunkSize:      10, // Very small to force word-level or sentence-level split
 		Concurrency:       2,
 		Temperature:       0,
@@ -119,7 +119,7 @@ func TestProcessor_Fallback(t *testing.T) {
 
 	cfg := &config.Config{
 		APIURL:            server.URL,
-		Model:             "test",
+		Model: "translategemma:12b",
 		MaxChunkSize:      100,
 		Concurrency:       1,
 		RequestTimeoutSec: 1,
@@ -177,7 +177,7 @@ func TestProcessor_ConcurrencyQueueTimeout(t *testing.T) {
 	// (which is > 2.5s) so the 3rd, 4th, 5th should TIMEOUT.
 	cfg := &config.Config{
 		APIURL:            server.URL,
-		Model:             "test",
+		Model: "translategemma:12b",
 		MaxChunkSize:      100,
 		Concurrency:       5,
 		RequestTimeoutSec: 2,

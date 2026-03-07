@@ -66,7 +66,7 @@ func TestTranslator(t *testing.T) {
 
 	cfg := &config.Config{
 		APIURL:            server.URL,
-		Model:             "test-model",
+		Model: "translategemma:12b",
 		Prompt:            "test prompt",
 		Glossary:          map[string]string{"Demand": "需求(强制)"},
 		Temperature:       0.1,

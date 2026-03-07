@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -74,9 +77,46 @@ func main() {
 	// API Endpoint: Load Roles
 	http.HandleFunc("/api/roles", handleRoles)
 
-	port := ":4000"
-	fmt.Printf("Web server is running beautifully at http://localhost%s\n", port)
-	log.Fatal(http.ListenAndServe(port, nil))
+	port := getAvailablePort(4000)
+	fmt.Printf("Web server is running beautifully at http://localhost:%d\n", port)
+
+	// Open the browser automatically
+	go openBrowser(fmt.Sprintf("http://localhost:%d", port))
+
+	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", port), nil))
+}
+
+// getAvailablePort returns an available port starting from the given startPort
+func getAvailablePort(startPort int) int {
+	for port := startPort; port < 65535; port++ {
+		ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+		if err == nil {
+			ln.Close()
+			return port
+		}
+	}
+	return startPort // Fallback to startPort if no ports are available
+}
+
+// openBrowser opens the specified URL in the default browser of the user.
+func openBrowser(url string) {
+	// Give the server a moment to start
+	time.Sleep(500 * time.Millisecond)
+
+	var err error
+	switch runtime.GOOS {
+	case "linux":
+		err = exec.Command("xdg-open", url).Start()
+	case "windows":
+		err = exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+	case "darwin":
+		err = exec.Command("open", url).Start()
+	default:
+		err = fmt.Errorf("unsupported platform")
+	}
+	if err != nil {
+		fmt.Printf("Failed to open browser automatically: %v\n", err)
+	}
 }
 
 func handleTranslateStart(w http.ResponseWriter, r *http.Request) {

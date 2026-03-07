@@ -32,12 +32,55 @@ type SubChunk struct {
 	Err        error
 }
 
+// getFilePrefix extracts the file path part from an ID like "OEBPS/ch1.xhtml_node_5"
+func getFilePrefix(id string) string {
+	idx := strings.LastIndex(id, "_node_")
+	if idx > 0 {
+		return id[:idx]
+	}
+	return ""
+}
+
 // Process handles chunking, concurrent translation, and reassembly.
 func (p *Processor) Process(blocks []parser.TextBlock, onProgress func(int, int, string)) ([]parser.TranslatedBlock, error) {
+	// 0. Pre-processing (Context Aggregation for short texts)
+	var mergedBlocks []parser.TextBlock
+	skipMap := make(map[string]bool)
+
+	for i := 0; i < len(blocks); i++ {
+		b := blocks[i]
+		runes := []rune(b.OriginalText)
+
+		// Trigger condition: short text block (length < 30)
+		if len(runes) < 30 {
+			prefix := getFilePrefix(b.ID)
+			mergedText := b.OriginalText
+
+			j := i + 1
+			for ; j < len(blocks); j++ {
+				nextB := blocks[j]
+				if prefix != "" && getFilePrefix(nextB.ID) != prefix {
+					break // strictly same file
+				}
+				mergedText += " " + nextB.OriginalText
+				skipMap[nextB.ID] = true
+
+				// Stop merging if we've accumulated enough context
+				if len([]rune(mergedText)) >= 60 {
+					j++
+					break
+				}
+			}
+			b.OriginalText = mergedText
+			i = j - 1
+		}
+		mergedBlocks = append(mergedBlocks, b)
+	}
+
 	var subChunks []SubChunk
 
 	// 1. Chunking
-	for _, b := range blocks {
+	for _, b := range mergedBlocks {
 		chunks := p.splitText(b.OriginalText)
 		for i, cText := range chunks {
 			if strings.TrimSpace(cText) == "" {
@@ -131,7 +174,15 @@ func (p *Processor) Process(blocks []parser.TextBlock, onProgress func(int, int,
 	}
 
 	var translatedBlocks []parser.TranslatedBlock
-	for _, b := range blocks {
+	for _, b := range blocks { // iterate over original unmodified blocks to map all IDs
+		if skipMap[b.ID] {
+			translatedBlocks = append(translatedBlocks, parser.TranslatedBlock{
+				ID:             b.ID,
+				TranslatedText: "<!--merged-->", // Special token to prevent parser.Assemble from skipping empty overrides
+			})
+			continue
+		}
+
 		chunks := blocksMap[b.ID]
 		// The chunks are already appended in order, but we can trust the stable order from subChunks loop
 		// Actually, map iteration is random, but we append from subChunks array which is order-preserving?

@@ -40,6 +40,22 @@ func (t *Translator) Translate(text string, onEvent ...func(string)) (string, er
 		ev = onEvent[0]
 	}
 
+	// 0. Short Text / Glossary Fallback Strategy
+	textTrimmed := strings.TrimSpace(text)
+	runes := []rune(textTrimmed)
+	if len(runes) < 20 {
+		// Priority 1: Check Glossary for exact match
+		for en, cn := range t.cfg.Glossary {
+			if strings.EqualFold(textTrimmed, strings.TrimSpace(en)) {
+				return cn, nil
+			}
+		}
+		// Priority 2: If extremely short and no spaces, return as-is
+		if len(runes) < 5 && !strings.Contains(textTrimmed, " ") {
+			return text, nil // Fallback to original text
+		}
+	}
+
 	payload := map[string]interface{}{
 		"model":       t.cfg.Model,
 		"temperature": t.cfg.Temperature,
@@ -133,6 +149,16 @@ func (t *Translator) Translate(text string, onEvent ...func(string)) (string, er
 
 		if len(result.Choices) > 0 {
 			translated = result.Choices[0].Message.Content
+
+			// 0.5 Refusal Intercept: Check if the model is complaining about lack of context
+			if strings.Contains(translated, "请提供需要翻译的文本") ||
+				strings.Contains(translated, "无法翻译") ||
+				strings.Contains(translated, "未提供上下文") ||
+				strings.Contains(translated, "没有任何内容") ||
+				strings.Contains(translated, "请提供包含") {
+				return text, fmt.Errorf("model refused to translate (fallback to original): %s", translated)
+			}
+
 			break // success!
 		} else {
 			return "", fmt.Errorf("API returned empty choices array")
