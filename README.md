@@ -25,7 +25,7 @@ go run ./cmd/webrunner/main.go
 启动成功后, 会自动打开浏览器，显示翻译程序
 
 
-![img.png](img.png)
+![img_1.png](img_1.png)
 
 
 ## 二、扩展翻译角色
