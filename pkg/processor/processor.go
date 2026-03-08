@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"unicode"
 	"unicode/utf8"
 
 	"auto_translate/pkg/config"
@@ -57,7 +58,109 @@ func getFilePrefix(id string) string {
 }
 
 func isEpubNodeID(id string) bool {
-	return strings.Contains(id, "_node_")
+	return strings.Contains(id, "_node_") || strings.Contains(id, "_block_")
+}
+
+func isASCIIAlphaDashPiece(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '-' || r == '–' || r == '—' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func hasDashRune(s string) bool {
+	return strings.ContainsAny(s, "-–—")
+}
+
+func endsWithDash(s string) bool {
+	return strings.HasSuffix(s, "-") || strings.HasSuffix(s, "–") || strings.HasSuffix(s, "—")
+}
+
+func startsWithDash(s string) bool {
+	return strings.HasPrefix(s, "-") || strings.HasPrefix(s, "–") || strings.HasPrefix(s, "—")
+}
+
+func shouldMergeEpubHyphenPiece(current, next string) bool {
+	current = strings.TrimSpace(current)
+	next = strings.TrimSpace(next)
+	if !isASCIIAlphaDashPiece(current) || !isASCIIAlphaDashPiece(next) {
+		return false
+	}
+	if utf8.RuneCountInString(current) > 24 || utf8.RuneCountInString(next) > 24 {
+		return false
+	}
+	if !hasDashRune(current) && !hasDashRune(next) {
+		return false
+	}
+	if endsWithDash(current) || startsWithDash(next) {
+		return true
+	}
+	if utf8.RuneCountInString(current) <= 4 || utf8.RuneCountInString(next) <= 4 {
+		return true
+	}
+	return false
+}
+
+func isLatinPhrasePiece(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	hasLetter := false
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+			hasLetter = true
+			continue
+		}
+		if (r >= '0' && r <= '9') || r == ' ' || r == '\'' || r == '"' || r == ',' || r == '.' || r == ';' || r == ':' || r == '(' || r == ')' || r == '/' {
+			continue
+		}
+		return false
+	}
+	return hasLetter
+}
+
+func startsWithLowerASCIILetter(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	r := rune(s[0])
+	return r >= 'a' && r <= 'z'
+}
+
+func endsWithTerminalPunctuation(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	last := s[len(s)-1]
+	return last == '.' || last == '!' || last == '?' || last == ':' || last == ';'
+}
+
+func shouldMergeEpubPhrasePiece(current, next string) bool {
+	current = strings.TrimSpace(current)
+	next = strings.TrimSpace(next)
+	if !isLatinPhrasePiece(current) || !isLatinPhrasePiece(next) {
+		return false
+	}
+	if !startsWithLowerASCIILetter(next) {
+		return false
+	}
+	if endsWithTerminalPunctuation(current) {
+		return false
+	}
+	if utf8.RuneCountInString(current)+utf8.RuneCountInString(next) > 100 {
+		return false
+	}
+	return true
 }
 
 // Process handles chunking, concurrent translation, and reassembly.
@@ -71,9 +174,12 @@ func (p *Processor) Process(blocks []parser.TextBlock, stateMap map[string]strin
 	for i := 0; i < len(blocks); i++ {
 		b := blocks[i]
 		runes := []rune(b.OriginalText)
+		if isEpubNodeID(b.ID) {
+			mergedBlocks = append(mergedBlocks, b)
+			continue
+		}
 
-		// Trigger condition: short text block (length < 30)
-		if len(runes) < 30 && !isEpubNodeID(b.ID) {
+		if len(runes) < 30 {
 			prefix := getFilePrefix(b.ID)
 			mergedText := b.OriginalText
 
@@ -273,44 +379,124 @@ func (p *Processor) splitText(text string) []string {
 		return []string{text}
 	}
 
-	// Try splitting by sentences (. )
+	sentences := splitIntoSentences(text)
 	var result []string
-	sentences := strings.Split(text, ". ")
 	var currentChunk strings.Builder
 
-	for i, s := range sentences {
-		part := s
-		if i < len(sentences)-1 {
-			part += ". " // restore the delimiter
+	flushChunk := func() {
+		if currentChunk.Len() > 0 {
+			result = append(result, currentChunk.String())
+			currentChunk.Reset()
 		}
+	}
 
+	for _, sentence := range sentences {
+		part := strings.TrimSpace(sentence)
+		if part == "" {
+			continue
+		}
+		if utf8.RuneCountInString(part) > p.cfg.MaxChunkSize {
+			flushChunk()
+			subParts := splitByWeakSeparators(part, p.cfg.MaxChunkSize)
+			result = append(result, subParts...)
+			continue
+		}
 		if utf8.RuneCountInString(currentChunk.String())+utf8.RuneCountInString(part) > p.cfg.MaxChunkSize {
-			if currentChunk.Len() > 0 {
-				result = append(result, currentChunk.String())
-				currentChunk.Reset()
-			}
-			// If 'part' itself is too large, we must hard split it
-			if utf8.RuneCountInString(part) > p.cfg.MaxChunkSize {
-				runes := []rune(part)
-				for len(runes) > 0 {
-					cut := p.cfg.MaxChunkSize
-					if cut > len(runes) {
-						cut = len(runes)
-					}
-					result = append(result, string(runes[:cut]))
-					runes = runes[cut:]
-				}
-			} else {
-				currentChunk.WriteString(part)
-			}
-		} else {
+			flushChunk()
 			currentChunk.WriteString(part)
+			continue
+		}
+		if currentChunk.Len() > 0 {
+			currentChunk.WriteString(" ")
+		}
+		currentChunk.WriteString(part)
+	}
+	flushChunk()
+	return result
+}
+
+func splitIntoSentences(text string) []string {
+	var sentences []string
+	var sb strings.Builder
+	runes := []rune(text)
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		sb.WriteRune(r)
+		if r == '\n' {
+			if strings.TrimSpace(sb.String()) != "" {
+				sentences = append(sentences, sb.String())
+			}
+			sb.Reset()
+			continue
+		}
+		if isSentenceTerminator(r) {
+			if r == '.' {
+				next := nextNonSpaceRune(runes, i+1)
+				if next != 0 && !(next >= 'A' && next <= 'Z') {
+					continue
+				}
+			}
+			sentences = append(sentences, sb.String())
+			sb.Reset()
 		}
 	}
-
-	if currentChunk.Len() > 0 {
-		result = append(result, currentChunk.String())
+	if strings.TrimSpace(sb.String()) != "" {
+		sentences = append(sentences, sb.String())
 	}
+	return sentences
+}
 
+func nextNonSpaceRune(runes []rune, start int) rune {
+	for i := start; i < len(runes); i++ {
+		if !unicode.IsSpace(runes[i]) {
+			return runes[i]
+		}
+	}
+	return 0
+}
+
+func isSentenceTerminator(r rune) bool {
+	switch r {
+	case '.', '!', '?', '。', '！', '？':
+		return true
+	default:
+		return false
+	}
+}
+
+func splitByWeakSeparators(text string, maxLen int) []string {
+	var result []string
+	var sb strings.Builder
+	runes := []rune(text)
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		sb.WriteRune(r)
+		if isWeakSeparator(r) && utf8.RuneCountInString(sb.String()) >= maxLen/2 {
+			part := strings.TrimSpace(sb.String())
+			if part != "" {
+				result = append(result, part)
+			}
+			sb.Reset()
+		}
+		if utf8.RuneCountInString(sb.String()) >= maxLen {
+			part := strings.TrimSpace(sb.String())
+			if part != "" {
+				result = append(result, part)
+			}
+			sb.Reset()
+		}
+	}
+	if strings.TrimSpace(sb.String()) != "" {
+		result = append(result, strings.TrimSpace(sb.String()))
+	}
 	return result
+}
+
+func isWeakSeparator(r rune) bool {
+	switch r {
+	case ',', ';', ':', '，', '；', '：':
+		return true
+	default:
+		return false
+	}
 }

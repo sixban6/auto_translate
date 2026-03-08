@@ -11,9 +11,9 @@
 
 ### 2. 启动 WebUI
 
-安装translategemma:12b
+安装模型qwen3.5:9b
 ```bash
-ollama pull translategemma:12b
+ollama pull qwen3.5:9b
 ```
 
 在项目根目录执行：

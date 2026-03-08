@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"auto_translate/pkg/config"
@@ -201,9 +202,9 @@ func TestChunkAggregation_EpubNoMerge(t *testing.T) {
 	proc := processor.New(cfg, tr)
 
 	blocks := []parser.TextBlock{
-		{ID: "ch1.html_node_1", OriginalText: "Chapter 1"},
-		{ID: "ch1.html_node_2", OriginalText: "Introduction"},
-		{ID: "ch1.html_node_3", OriginalText: "Long enough body text for direct translation."},
+		{ID: "ch1.html_block_1", OriginalText: "Chapter 1"},
+		{ID: "ch1.html_block_2", OriginalText: "Introduction"},
+		{ID: "ch1.html_block_3", OriginalText: "Long enough body text for direct translation."},
 	}
 
 	translatedBlocks, _, err := proc.Process(blocks, nil, nil, nil)
@@ -218,13 +219,135 @@ func TestChunkAggregation_EpubNoMerge(t *testing.T) {
 	for _, b := range translatedBlocks {
 		transMap[b.ID] = b.TranslatedText
 	}
-	if transMap["ch1.html_node_1"] != "Translated: Chapter 1" {
-		t.Fatalf("Unexpected node_1 output: %q", transMap["ch1.html_node_1"])
+	if transMap["ch1.html_block_1"] != "Translated: Chapter 1" {
+		t.Fatalf("Unexpected block_1 output: %q", transMap["ch1.html_block_1"])
 	}
-	if transMap["ch1.html_node_2"] != "Translated: Introduction" {
-		t.Fatalf("Unexpected node_2 output: %q", transMap["ch1.html_node_2"])
+	if transMap["ch1.html_block_2"] != "Translated: Introduction" {
+		t.Fatalf("Unexpected block_2 output: %q", transMap["ch1.html_block_2"])
 	}
-	if transMap["ch1.html_node_3"] != "Translated: Long enough body text for direct translation." {
-		t.Fatalf("Unexpected node_3 output: %q", transMap["ch1.html_node_3"])
+	if transMap["ch1.html_block_3"] != "Translated: Long enough body text for direct translation." {
+		t.Fatalf("Unexpected block_3 output: %q", transMap["ch1.html_block_3"])
+	}
+}
+
+func TestSentenceSplit_LongText(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		json.NewDecoder(r.Body).Decode(&payload)
+		content := ""
+		for _, m := range payload.Messages {
+			if m.Role == "user" {
+				content = m.Content
+			}
+		}
+		respMap := map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{
+					"message": map[string]string{
+						"content": "Translated: " + content,
+					},
+				},
+			},
+		}
+		json.NewEncoder(w).Encode(respMap)
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{
+		MaxChunkSize:      40,
+		APIURL:            server.URL,
+		Model:             "translategemma:12b",
+		RequestTimeoutSec: 10,
+		MaxRetries:        1,
+		Concurrency:       1,
+	}
+	tr := translator.New(cfg)
+	proc := processor.New(cfg, tr)
+
+	blocks := []parser.TextBlock{
+		{ID: "txt_0", OriginalText: "This is sentence one. This is sentence two that should trigger a split."},
+	}
+
+	translatedBlocks, _, err := proc.Process(blocks, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Process error: %v", err)
+	}
+
+	transMap := make(map[string]string)
+	for _, b := range translatedBlocks {
+		transMap[b.ID] = b.TranslatedText
+	}
+	if strings.Count(transMap["txt_0"], "Translated:") < 2 {
+		t.Fatalf("Expected sentence-based split to produce multiple translated chunks, got %q", transMap["txt_0"])
+	}
+}
+
+func TestChunkAggregation_EpubBlockIsolation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		json.NewDecoder(r.Body).Decode(&payload)
+		content := ""
+		for _, m := range payload.Messages {
+			if m.Role == "user" {
+				content = m.Content
+			}
+		}
+		respMap := map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{
+					"message": map[string]string{
+						"content": "Translated: " + content,
+					},
+				},
+			},
+		}
+		json.NewEncoder(w).Encode(respMap)
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{
+		MaxChunkSize:      1000,
+		APIURL:            server.URL,
+		Model:             "translategemma:12b",
+		RequestTimeoutSec: 10,
+		MaxRetries:        1,
+		Concurrency:       1,
+	}
+	tr := translator.New(cfg)
+	proc := processor.New(cfg, tr)
+
+	blocks := []parser.TextBlock{
+		{ID: "ch1.html_block_1", OriginalText: "This is a"},
+		{ID: "ch1.html_block_2", OriginalText: "choose"},
+		{ID: "ch1.html_block_3", OriginalText: "adventure book."},
+	}
+
+	translatedBlocks, _, err := proc.Process(blocks, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Process error: %v", err)
+	}
+
+	transMap := make(map[string]string)
+	for _, b := range translatedBlocks {
+		transMap[b.ID] = b.TranslatedText
+	}
+	if transMap["ch1.html_block_1"] != "Translated: This is a" {
+		t.Fatalf("Unexpected block_1 output: %q", transMap["ch1.html_block_1"])
+	}
+	if transMap["ch1.html_block_2"] != "Translated: choose" {
+		t.Fatalf("Unexpected block_2 output: %q", transMap["ch1.html_block_2"])
+	}
+	if transMap["ch1.html_block_3"] != "Translated: adventure book." {
+		t.Fatalf("Unexpected block_3 output: %q", transMap["ch1.html_block_3"])
 	}
 }

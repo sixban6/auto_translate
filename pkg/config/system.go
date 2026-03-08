@@ -150,6 +150,9 @@ func maxConcurrencyByCPU() int {
 	if cap < 1 {
 		return 1
 	}
+	if cap > 4 {
+		return 4
+	}
 	return cap
 }
 

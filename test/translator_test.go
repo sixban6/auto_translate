@@ -47,6 +47,10 @@ func TestTranslator(t *testing.T) {
 		mockResponse := ""
 		if content == "Test Demand" {
 			mockResponse = "```markdown\nHere is the translation: 测试需求\n```"
+		} else if content == "Hyphenated Token" {
+			mockResponse = "re--edited and re--contextualized"
+		} else if content == "re" {
+			mockResponse = "重新"
 		} else {
 			mockResponse = "Here is the translation:\n```\n普通的翻译内容\n```"
 		}
@@ -119,5 +123,21 @@ func TestTranslator(t *testing.T) {
 	// we just test that the output is properly cleaned up.
 	if res != "测试需求" {
 		t.Errorf("Cleanup failed, got %q", res)
+	}
+
+	res, _, err = tr.Translate("Hyphenated Token")
+	if err != nil {
+		t.Fatalf("Translate error: %v", err)
+	}
+	if res != "re-edited and re-contextualized" {
+		t.Errorf("Hyphen cleanup failed, got %q", res)
+	}
+
+	res, _, err = tr.Translate("re")
+	if err != nil {
+		t.Fatalf("Translate error: %v", err)
+	}
+	if res != "重新" {
+		t.Errorf("Expected short lowercase latin token to be translated, got %q", res)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -28,6 +29,10 @@ type Translator struct {
 	cfg    *config.Config
 	client *http.Client
 }
+
+var latinDoubleDashPattern = regexp.MustCompile(`([A-Za-z])[—–-]{2,}([A-Za-z])`)
+var rePrefixBeforeHanPattern = regexp.MustCompile(`(?i)\bre\s*[—–-]?\s*([\p{Han}])`)
+var hanReHanPattern = regexp.MustCompile(`([\p{Han}])\s*(?i:re)\s*[—–-]?\s*([\p{Han}])`)
 
 // New creates a new Translator instance.
 func New(cfg *config.Config) *Translator {
@@ -66,7 +71,9 @@ func (t *Translator) Translate(text string, onEvent ...func(string)) (string, Tr
 		}
 		// Priority 2: If extremely short and no spaces, return as-is
 		if len(runes) < 5 && !strings.Contains(textTrimmed, " ") {
-			return text, StatusFallback, nil // Fallback to original text
+			if !isASCIILowerWord(textTrimmed) {
+				return text, StatusFallback, nil
+			}
 		}
 	}
 
@@ -213,6 +220,9 @@ func (t *Translator) Translate(text string, onEvent ...func(string)) (string, Tr
 	translated = strings.TrimSpace(translated)
 	translated = strings.TrimSuffix(translated, "```")
 	translated = strings.TrimSpace(translated)
+	translated = latinDoubleDashPattern.ReplaceAllString(translated, "$1-$2")
+	translated = hanReHanPattern.ReplaceAllString(translated, "$1$2")
+	translated = rePrefixBeforeHanPattern.ReplaceAllString(translated, "$1")
 
 	// 2. Glossary Enforcement
 	for en, cn := range t.cfg.Glossary {
@@ -276,4 +286,19 @@ func shouldBypassTranslation(text string) bool {
 		}
 	}
 	return letterCount == 0
+}
+
+func isASCIILowerWord(s string) bool {
+	if s == "" {
+		return false
+	}
+	hasLetter := false
+	for _, r := range s {
+		if r >= 'a' && r <= 'z' {
+			hasLetter = true
+			continue
+		}
+		return false
+	}
+	return hasLetter
 }

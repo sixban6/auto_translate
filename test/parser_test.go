@@ -127,3 +127,55 @@ func TestEpubParser(t *testing.T) {
 		t.Errorf("Output HTML lost script tag: %s", newHtml)
 	}
 }
+
+func TestEpubParser_MonolingualInlinePreserved(t *testing.T) {
+	testZip := "test_epub_inline_preserved.epub"
+	f, _ := os.Create(testZip)
+	w := zip.NewWriter(f)
+	m, _ := w.CreateHeader(&zip.FileHeader{Name: "mimetype", Method: zip.Store})
+	m.Write([]byte("application/epub+zip"))
+	h, _ := w.Create("OEBPS/test.xhtml")
+	h.Write([]byte("<html><body><p>This is a <em>choose</em> adventure book.</p></body></html>"))
+	w.Close()
+	f.Close()
+	defer os.Remove(testZip)
+
+	p, err := parser.GetParser(".epub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocks, err := p.Extract(testZip)
+	if err != nil {
+		t.Fatalf("Extract failed: %v", err)
+	}
+	if len(blocks) != 1 {
+		t.Fatalf("Expected 1 block, got %d", len(blocks))
+	}
+
+	monoOut := "test_out_inline_preserved_mono.epub"
+	defer os.Remove(monoOut)
+	err = p.Assemble([]parser.TranslatedBlock{
+		{ID: blocks[0].ID, TranslatedText: "AAA BBB CCC"},
+	}, monoOut, false)
+	if err != nil {
+		t.Fatalf("Assemble mono failed: %v", err)
+	}
+
+	r2, _ := zip.OpenReader(monoOut)
+	defer r2.Close()
+	var html2 string
+	for _, zf := range r2.File {
+		if zf.Name == "OEBPS/test.xhtml" {
+			rc, _ := zf.Open()
+			buf, _ := io.ReadAll(rc)
+			rc.Close()
+			html2 = string(buf)
+		}
+	}
+	if !strings.Contains(html2, "<em>") {
+		t.Fatalf("Monolingual output should keep inline tag structure, got: %s", html2)
+	}
+	if !strings.Contains(html2, "AAA") || !strings.Contains(html2, "BBB") || !strings.Contains(html2, "CCC") {
+		t.Fatalf("Monolingual output should include translated segments, got: %s", html2)
+	}
+}
