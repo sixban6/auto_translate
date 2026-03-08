@@ -86,8 +86,7 @@ func TestTranslator_ModelRefusalIntercept(t *testing.T) {
 	}
 }
 
-// 3. Epub 文本合并测试 (Context Aggregation test)
-func TestChunkAggregation_ShortTexts(t *testing.T) {
+func TestChunkAggregation_TxtShortTexts(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var payload struct {
 			Messages []struct {
@@ -128,11 +127,10 @@ func TestChunkAggregation_ShortTexts(t *testing.T) {
 	tr := translator.New(cfg)
 	proc := processor.New(cfg, tr)
 
-	// Simulate blocks from the same file: very short texts should be merged.
 	blocks := []parser.TextBlock{
-		{ID: "ch1.html_node_1", OriginalText: "Chapter 1"},
-		{ID: "ch1.html_node_2", OriginalText: "Introduction"},
-		{ID: "ch1.html_node_3", OriginalText: "This is a long sentence that should not be merged because it's long enough. It actually has some meat to it."},
+		{ID: "txt_0", OriginalText: "Chapter 1"},
+		{ID: "txt_1", OriginalText: "Introduction"},
+		{ID: "txt_2", OriginalText: "This is a long sentence that should not be merged because it's long enough. It actually has some meat to it."},
 	}
 
 	translatedBlocks, _, err := proc.Process(blocks, nil, nil, nil)
@@ -149,18 +147,84 @@ func TestChunkAggregation_ShortTexts(t *testing.T) {
 	}
 
 	expectedMergedText := "Translated: Chapter 1 Introduction This is a long sentence that should not be merged because it's long enough. It actually has some meat to it."
-	if transMap["ch1.html_node_1"] != expectedMergedText {
-		t.Errorf("Expected node_1 to merge node_2 and node_3 and translate together, got: %s", transMap["ch1.html_node_1"])
+	if transMap["txt_0"] != expectedMergedText {
+		t.Errorf("Expected txt_0 to merge txt_1 and txt_2 and translate together, got: %s", transMap["txt_0"])
 	}
 
-	// For node_2 and node_3, their original text was incorporated into node_1.
-	// We expect their translated text to be "<!--merged-->"
-	node2Text := transMap["ch1.html_node_2"]
+	node2Text := transMap["txt_1"]
 	if node2Text != "<!--merged-->" {
-		t.Errorf("Expected node_2 to be merged and thus replaced with an HTML comment, got: %q", node2Text)
+		t.Errorf("Expected txt_1 to be merged and thus replaced with an HTML comment, got: %q", node2Text)
 	}
-	node3Text := transMap["ch1.html_node_3"]
+	node3Text := transMap["txt_2"]
 	if node3Text != "<!--merged-->" {
-		t.Errorf("Expected node_3 to be merged and thus replaced with an HTML comment, got: %q", node3Text)
+		t.Errorf("Expected txt_2 to be merged and thus replaced with an HTML comment, got: %q", node3Text)
+	}
+}
+
+func TestChunkAggregation_EpubNoMerge(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		json.NewDecoder(r.Body).Decode(&payload)
+		content := ""
+		for _, m := range payload.Messages {
+			if m.Role == "user" {
+				content = m.Content
+			}
+		}
+		respMap := map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{
+					"message": map[string]string{
+						"content": "Translated: " + content,
+					},
+				},
+			},
+		}
+		json.NewEncoder(w).Encode(respMap)
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{
+		MaxChunkSize:      1000,
+		APIURL:            server.URL,
+		Model:             "translategemma:12b",
+		RequestTimeoutSec: 10,
+		MaxRetries:        1,
+		Concurrency:       1,
+	}
+	tr := translator.New(cfg)
+	proc := processor.New(cfg, tr)
+
+	blocks := []parser.TextBlock{
+		{ID: "ch1.html_node_1", OriginalText: "Chapter 1"},
+		{ID: "ch1.html_node_2", OriginalText: "Introduction"},
+		{ID: "ch1.html_node_3", OriginalText: "Long enough body text for direct translation."},
+	}
+
+	translatedBlocks, _, err := proc.Process(blocks, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Process error: %v", err)
+	}
+	if len(translatedBlocks) != 3 {
+		t.Fatalf("Expected 3 translated blocks, got %d", len(translatedBlocks))
+	}
+
+	transMap := make(map[string]string)
+	for _, b := range translatedBlocks {
+		transMap[b.ID] = b.TranslatedText
+	}
+	if transMap["ch1.html_node_1"] != "Translated: Chapter 1" {
+		t.Fatalf("Unexpected node_1 output: %q", transMap["ch1.html_node_1"])
+	}
+	if transMap["ch1.html_node_2"] != "Translated: Introduction" {
+		t.Fatalf("Unexpected node_2 output: %q", transMap["ch1.html_node_2"])
+	}
+	if transMap["ch1.html_node_3"] != "Translated: Long enough body text for direct translation." {
+		t.Fatalf("Unexpected node_3 output: %q", transMap["ch1.html_node_3"])
 	}
 }

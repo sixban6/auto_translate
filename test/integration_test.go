@@ -75,4 +75,7 @@ func TestIntegration(t *testing.T) {
 	if !strings.Contains(resultStr, "Great Integration") {
 		t.Errorf("Output did not contain original in bilingual mode. Got %s", resultStr)
 	}
+	if strings.Index(resultStr, "Hello World.") > strings.Index(resultStr, "Mock Translation") {
+		t.Errorf("Expected bilingual order to keep original above translation. Got %s", resultStr)
+	}
 }

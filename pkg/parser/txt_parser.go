@@ -68,8 +68,7 @@ func (p *TxtParser) Assemble(blocks []TranslatedBlock, outputPath string, biling
 		}
 
 		if bilingual {
-			// Output Chinese then English paragraph
-			sb.WriteString(fmt.Sprintf("%s\n%s\n\n", translated, para))
+			sb.WriteString(fmt.Sprintf("%s\n%s\n\n", para, translated))
 		} else {
 			sb.WriteString(fmt.Sprintf("%s\n\n", translated))
 		}

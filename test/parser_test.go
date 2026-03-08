@@ -49,7 +49,7 @@ func TestTxtParser(t *testing.T) {
 	outBytes, _ := os.ReadFile(outFile)
 	outContent := string(outBytes)
 
-	if !strings.Contains(outContent, "段落 1\nParagraph 1") {
+	if !strings.Contains(outContent, "Paragraph 1\n段落 1") {
 		t.Errorf("Assemble didn't output correct bilingual format, got: %v", outContent)
 	}
 }
@@ -119,6 +119,9 @@ func TestEpubParser(t *testing.T) {
 	}
 	if !strings.Contains(newHtml, "Hello World") {
 		t.Errorf("Output HTML missing original in bilingual mode: %s", newHtml)
+	}
+	if strings.Index(newHtml, "Hello World") > strings.Index(newHtml, "你好世界") {
+		t.Errorf("Output HTML bilingual order should be original first then translation: %s", newHtml)
 	}
 	if !strings.Contains(newHtml, "var ignore") {
 		t.Errorf("Output HTML lost script tag: %s", newHtml)

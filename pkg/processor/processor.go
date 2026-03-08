@@ -56,6 +56,10 @@ func getFilePrefix(id string) string {
 	return ""
 }
 
+func isEpubNodeID(id string) bool {
+	return strings.Contains(id, "_node_")
+}
+
 // Process handles chunking, concurrent translation, and reassembly.
 func (p *Processor) Process(blocks []parser.TextBlock, stateMap map[string]string, onProgress func(int, int, string), onChunkCompleted func(string, string)) ([]parser.TranslatedBlock, TranslationStats, error) {
 	var stats TranslationStats
@@ -69,7 +73,7 @@ func (p *Processor) Process(blocks []parser.TextBlock, stateMap map[string]strin
 		runes := []rune(b.OriginalText)
 
 		// Trigger condition: short text block (length < 30)
-		if len(runes) < 30 {
+		if len(runes) < 30 && !isEpubNodeID(b.ID) {
 			prefix := getFilePrefix(b.ID)
 			mergedText := b.OriginalText
 

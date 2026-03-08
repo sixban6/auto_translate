@@ -108,19 +108,18 @@ func (p *EpubParser) Assemble(blocks []TranslatedBlock, outputPath string, bilin
 		}
 
 		if bilingual {
-			// Construct: translated <br> original
 			translatedNode := &html.Node{Type: html.TextNode, Data: translated}
 			brNode := &html.Node{Type: html.ElementNode, DataAtom: atom.Br, Data: "br"}
-			origNode := &html.Node{Type: html.TextNode, Data: tNode.Data} // backup original
+			origNode := &html.Node{Type: html.TextNode, Data: tNode.Data}
 
 			parent := tNode.Parent
 			if parent != nil {
-				parent.InsertBefore(translatedNode, tNode)
-				parent.InsertBefore(brNode, tNode)
 				parent.InsertBefore(origNode, tNode)
+				parent.InsertBefore(brNode, tNode)
+				parent.InsertBefore(translatedNode, tNode)
 				parent.RemoveChild(tNode)
 			} else {
-				tNode.Data = fmt.Sprintf("%s / %s", translated, tNode.Data)
+				tNode.Data = fmt.Sprintf("%s / %s", tNode.Data, translated)
 			}
 		} else {
 			tNode.Data = translated
