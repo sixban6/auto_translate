@@ -63,6 +63,8 @@ func Load(path string) (*Config, error) {
 
 // AutoDetectAndCalculate populates the config with default calculated values based on current environment and model.
 func (cfg *Config) AutoDetectAndCalculate() {
+	cpuCap := maxConcurrencyByCPU()
+	modelCap := maxConcurrencyByModel(cfg.Model)
 	if cfg.Concurrency <= 0 {
 		info, err := AutoCalculateConcurrency(cfg.APIURL, cfg.Model)
 		if err != nil {
@@ -78,6 +80,20 @@ func (cfg *Config) AutoDetectAndCalculate() {
 		}
 	} else if cfg.SystemInfoMsg == "" {
 		cfg.SystemInfoMsg = fmt.Sprintf("[配置检测] 用户指定并发数：%d。", cfg.Concurrency)
+	}
+	if cfg.Concurrency > cpuCap {
+		cfg.Concurrency = cpuCap
+		if cfg.SystemWarning != "" {
+			cfg.SystemWarning += " "
+		}
+		cfg.SystemWarning += fmt.Sprintf("⚠️ 并发上限已按 CPU 核心约束为 %d（核心数-1）。", cpuCap)
+	}
+	if cfg.Concurrency > modelCap {
+		cfg.Concurrency = modelCap
+		if cfg.SystemWarning != "" {
+			cfg.SystemWarning += " "
+		}
+		cfg.SystemWarning += fmt.Sprintf("⚠️ 当前模型已启用稳态并发上限 %d，以降低排队超时。", modelCap)
 	}
 
 	if cfg.Temperature <= 0 {
@@ -111,6 +127,8 @@ func AutoCalculateMaxChunkSize(modelName string) int {
 	switch {
 	case strings.Contains(model, "qwen2.5"):
 		size = 1100
+	case strings.Contains(model, "qwen3.5"):
+		size = 700
 	case strings.Contains(model, "llama3"):
 		size = 1100
 	}
@@ -121,4 +139,15 @@ func AutoCalculateMaxChunkSize(modelName string) int {
 		return 1400
 	}
 	return size
+}
+
+func maxConcurrencyByModel(modelName string) int {
+	model := strings.ToLower(modelName)
+	if strings.Contains(model, "translategemma") {
+		return 4
+	}
+	if strings.Contains(model, "qwen") || strings.Contains(model, "deepseek") || strings.Contains(model, "llama") || strings.Contains(model, "mistral") {
+		return 3
+	}
+	return 4
 }

@@ -145,6 +145,14 @@ func autoCalculateLogic(ramBytes uint64, modSizeBytes uint64, osType string) int
 	return recommended
 }
 
+func maxConcurrencyByCPU() int {
+	cap := runtime.NumCPU() - 1
+	if cap < 1 {
+		return 1
+	}
+	return cap
+}
+
 // tryRestartOllama attempts to set the env var and restart the Ollama process
 func tryRestartOllama(concurrency int) error {
 	envVal := strconv.Itoa(concurrency)
@@ -196,15 +204,13 @@ func AutoCalculateConcurrency(apiURL, modelName string) (*SystemInfo, error) {
 	}
 
 	recommended := autoCalculateLogic(ram, modSize, runtime.GOOS)
-	cpuCap := runtime.NumCPU() * 2
-	if cpuCap < 1 {
-		cpuCap = 1
-	}
-	if cpuCap > 10 {
-		cpuCap = 10
-	}
+	cpuCap := maxConcurrencyByCPU()
 	if recommended > cpuCap {
 		recommended = cpuCap
+	}
+	modelCap := maxConcurrencyByModel(modelName)
+	if recommended > modelCap {
+		recommended = modelCap
 	}
 
 	warning := ""

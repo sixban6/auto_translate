@@ -11,6 +11,10 @@ func TestAutoCalculateMaxChunkSize(t *testing.T) {
 	if qwenSize != 1100 {
 		t.Fatalf("Expected qwen2.5 chunk size 1100, got %d", qwenSize)
 	}
+	qwen35Size := config.AutoCalculateMaxChunkSize("qwen3.5:4b")
+	if qwen35Size != 700 {
+		t.Fatalf("Expected qwen3.5 chunk size 700, got %d", qwen35Size)
+	}
 
 	unknownSize := config.AutoCalculateMaxChunkSize("unknown-model")
 	if unknownSize != 800 {

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode"
 
 	"auto_translate/pkg/config"
 )
@@ -44,6 +45,9 @@ func (t *Translator) Translate(text string, onEvent ...func(string)) (string, Tr
 	if strings.TrimSpace(text) == "" {
 		return "", StatusSkip, nil // skip empty chunks
 	}
+	if shouldBypassTranslation(text) {
+		return text, StatusFallback, nil
+	}
 
 	var ev func(string)
 	if len(onEvent) > 0 {
@@ -66,6 +70,7 @@ func (t *Translator) Translate(text string, onEvent ...func(string)) (string, Tr
 		}
 	}
 
+	requestURL := t.cfg.APIURL
 	payload := map[string]interface{}{
 		"model":       t.cfg.Model,
 		"temperature": t.cfg.Temperature,
@@ -73,6 +78,20 @@ func (t *Translator) Translate(text string, onEvent ...func(string)) (string, Tr
 			{"role": "system", "content": t.cfg.Prompt},
 			{"role": "user", "content": text},
 		},
+		"stream": false,
+	}
+	if !strings.Contains(strings.ToLower(t.cfg.Model), "translategemma") {
+		requestURL = toOllamaChatURL(t.cfg.APIURL)
+		payload = map[string]interface{}{
+			"model": t.cfg.Model,
+			"messages": []map[string]string{
+				{"role": "system", "content": t.cfg.Prompt},
+				{"role": "user", "content": text},
+			},
+			"stream":  false,
+			"think":   false,
+			"options": map[string]interface{}{"temperature": t.cfg.Temperature},
+		}
 	}
 
 	jsonData, err := json.Marshal(payload)
@@ -87,7 +106,7 @@ func (t *Translator) Translate(text string, onEvent ...func(string)) (string, Tr
 	}
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		req, err := http.NewRequest("POST", t.cfg.APIURL, bytes.NewBuffer(jsonData))
+		req, err := http.NewRequest("POST", requestURL, bytes.NewBuffer(jsonData))
 		if err != nil {
 			return "", StatusFailed, fmt.Errorf("failed to create request: %w", err)
 		}
@@ -122,7 +141,7 @@ func (t *Translator) Translate(text string, onEvent ...func(string)) (string, Tr
 			if ev != nil {
 				ev(fmt.Sprintf("API request failed (Attempt %d/%d): %v. Retrying...", attempt, maxRetries, err))
 			}
-			time.Sleep(time.Duration(attempt*2) * time.Second) // basic backoff
+			time.Sleep(time.Duration(attempt*8) * time.Second)
 			continue
 		}
 
@@ -134,7 +153,7 @@ func (t *Translator) Translate(text string, onEvent ...func(string)) (string, Tr
 			if ev != nil {
 				ev(fmt.Sprintf("API returned status %d (Attempt %d/%d). Retrying...", resp.StatusCode, attempt, maxRetries))
 			}
-			time.Sleep(time.Duration(attempt*2) * time.Second)
+			time.Sleep(time.Duration(attempt*8) * time.Second)
 			continue
 		}
 
@@ -144,13 +163,16 @@ func (t *Translator) Translate(text string, onEvent ...func(string)) (string, Tr
 			return "", StatusFailed, fmt.Errorf("failed to read API response body: %w", err)
 		}
 
-		// Parse the OpenAI compatible response
+		// Parse response
 		var result struct {
 			Choices []struct {
 				Message struct {
 					Content string `json:"content"`
 				} `json:"message"`
 			} `json:"choices"`
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
 		}
 
 		if err := json.Unmarshal(body, &result); err != nil {
@@ -159,20 +181,20 @@ func (t *Translator) Translate(text string, onEvent ...func(string)) (string, Tr
 
 		if len(result.Choices) > 0 {
 			translated = result.Choices[0].Message.Content
-
-			// 0.5 Refusal Intercept: Check if the model is complaining about lack of context
-			if strings.Contains(translated, "请提供需要翻译的文本") ||
-				strings.Contains(translated, "无法翻译") ||
-				strings.Contains(translated, "未提供上下文") ||
-				strings.Contains(translated, "没有任何内容") ||
-				strings.Contains(translated, "请提供包含") {
-				return text, StatusRefused, fmt.Errorf("model refused to translate (fallback to original): %s", translated)
-			}
-
-			break // success!
+		} else if strings.TrimSpace(result.Message.Content) != "" {
+			translated = result.Message.Content
 		} else {
-			return "", StatusFailed, fmt.Errorf("API returned empty choices array")
+			return "", StatusFailed, fmt.Errorf("API returned empty choices/message")
 		}
+
+		if strings.Contains(translated, "请提供需要翻译的文本") ||
+			strings.Contains(translated, "无法翻译") ||
+			strings.Contains(translated, "未提供上下文") ||
+			strings.Contains(translated, "没有任何内容") ||
+			strings.Contains(translated, "请提供包含") {
+			return text, StatusRefused, fmt.Errorf("model refused to translate (fallback to original): %s", translated)
+		}
+		break
 	}
 
 	// 1. Format cleaning (strip markdown blocks if any sneaked in and simple prefix stripping)
@@ -216,4 +238,42 @@ func (t *Translator) Translate(text string, onEvent ...func(string)) (string, Tr
 	}
 
 	return translated, StatusSuccess, nil
+}
+
+func toOllamaChatURL(apiURL string) string {
+	if strings.Contains(apiURL, "/api/chat") {
+		return apiURL
+	}
+	if strings.Contains(apiURL, "/v1/chat/completions") {
+		return strings.Replace(apiURL, "/v1/chat/completions", "/api/chat", 1)
+	}
+	return strings.TrimRight(apiURL, "/") + "/api/chat"
+}
+
+func shouldBypassTranslation(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return true
+	}
+
+	lower := strings.ToLower(trimmed)
+	if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") || strings.HasPrefix(lower, "www.") {
+		return true
+	}
+
+	if !strings.Contains(trimmed, " ") {
+		for _, ext := range []string{".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".bmp", ".ico", ".css", ".js", ".json", ".xml", ".woff", ".woff2", ".ttf", ".otf"} {
+			if strings.HasSuffix(lower, ext) {
+				return true
+			}
+		}
+	}
+
+	letterCount := 0
+	for _, r := range trimmed {
+		if unicode.IsLetter(r) {
+			letterCount++
+		}
+	}
+	return letterCount == 0
 }
