@@ -20,6 +20,7 @@ import (
 	"auto_translate/pkg/parser"
 	"auto_translate/pkg/processor"
 	"auto_translate/pkg/translator"
+	"auto_translate/pkg/webtask"
 )
 
 type TranslationTask struct {
@@ -30,17 +31,10 @@ type TranslationTask struct {
 	Config    *config.Config
 	InputPath string
 	OutPath   string
-	MessageCh chan LogMsg
+	MessageCh chan webtask.LogMsg
 	Error     string
 	Stats     processor.TranslationStats
-}
-
-type LogMsg struct {
-	Type    string `json:"type"`
-	Message string `json:"message"`
-	Total   int    `json:"total"`
-	Current int    `json:"current"`
-	Status  string `json:"status"`
+	StartedAt time.Time
 }
 
 var (
@@ -196,7 +190,7 @@ func handleTranslateStart(w http.ResponseWriter, r *http.Request) {
 		Config:    &cfg,
 		InputPath: inputPath,
 		OutPath:   outPath,
-		MessageCh: make(chan LogMsg, 100),
+		MessageCh: make(chan webtask.LogMsg, 100),
 	}
 
 	mu.Lock()
@@ -443,28 +437,37 @@ func handleExplainConfig(w http.ResponseWriter, r *http.Request) {
 // Background Task Runner
 func runTranslationTask(t *TranslationTask) {
 	defer close(t.MessageCh)
+	startTime := time.Now()
+	t.StartedAt = startTime
+	etaEstimator := webtask.NewETAEstimator(0.25, 5)
 
 	sendLog := func(msg, mType string) {
-		t.MessageCh <- LogMsg{
-			Type:    mType,
-			Message: msg,
-			Total:   t.Total,
-			Current: t.Current,
-			Status:  t.Status,
+		elapsedSec := 0
+		if !t.StartedAt.IsZero() {
+			elapsedSec = int(time.Since(t.StartedAt).Seconds())
+		}
+		t.MessageCh <- webtask.LogMsg{
+			Type:       mType,
+			Message:    msg,
+			Total:      t.Total,
+			Current:    t.Current,
+			Status:     t.Status,
+			ElapsedSec: elapsedSec,
+			EtaSec:     etaEstimator.Estimate(t.Current, t.Total, time.Since(t.StartedAt)),
 		}
 	}
 
 	fail := func(err error) {
 		t.Status = "error"
 		t.Error = err.Error()
-		t.MessageCh <- LogMsg{
-			Type:    "red",
-			Message: fmt.Sprintf("❌ 发生严重错误: %v", err),
-			Status:  "error",
+		t.MessageCh <- webtask.LogMsg{
+			Type:       "red",
+			Message:    fmt.Sprintf("❌ 发生严重错误: %v", err),
+			Status:     "error",
+			ElapsedSec: int(time.Since(startTime).Seconds()),
+			EtaSec:     -1,
 		}
 	}
-
-	startTime := time.Now()
 	ext := filepath.Ext(t.Config.InputFile)
 	p, err := parser.GetParser(ext)
 	if err != nil {
@@ -515,12 +518,14 @@ func runTranslationTask(t *TranslationTask) {
 			mType = "green"
 		}
 
-		t.MessageCh <- LogMsg{
-			Type:    mType,
-			Message: msg,
-			Total:   total,
-			Current: t.Current,
-			Status:  t.Status,
+		t.MessageCh <- webtask.LogMsg{
+			Type:       mType,
+			Message:    msg,
+			Total:      total,
+			Current:    t.Current,
+			Status:     t.Status,
+			ElapsedSec: int(time.Since(startTime).Seconds()),
+			EtaSec:     etaEstimator.Estimate(t.Current, total, time.Since(startTime)),
 		}
 	})
 	if err != nil {
@@ -544,10 +549,12 @@ func runTranslationTask(t *TranslationTask) {
 	elapsed := time.Since(startTime)
 	sendLog(fmt.Sprintf("⏱️ 翻译总耗时: %s", formatDuration(elapsed)), "green")
 
-	t.MessageCh <- LogMsg{
-		Status:  "completed",
-		Total:   t.Total,
-		Current: t.Total,
+	t.MessageCh <- webtask.LogMsg{
+		Status:     "completed",
+		Total:      t.Total,
+		Current:    t.Total,
+		ElapsedSec: int(time.Since(startTime).Seconds()),
+		EtaSec:     0,
 	}
 }
 

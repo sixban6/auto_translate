@@ -8,16 +8,20 @@ document.addEventListener('DOMContentLoaded', () => {
     const downloadBtn = document.getElementById('downloadBtn');
     const configForm = document.getElementById('configForm');
     const terminalLog = document.getElementById('terminalLog');
+    const completionChimeInput = configForm.querySelector('input[name="completion_chime"]');
 
     let currentFile = null;
     let eventSource = null;
+    let audioContext = null;
+    let chimePlayedTaskId = '';
 
     function saveHistory(config) {
         localStorage.setItem('auto_trans_config', JSON.stringify({
             api_url: config.api_url,
             request_timeout_sec: config.request_timeout_sec,
             max_retries: config.max_retries,
-            bilingual: config.bilingual
+            bilingual: config.bilingual,
+            completion_chime: completionChimeInput.checked
         }));
     }
 
@@ -30,6 +34,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (conf.request_timeout_sec) document.querySelector('input[name="request_timeout_sec"]').value = conf.request_timeout_sec;
                 if (conf.max_retries) document.querySelector('input[name="max_retries"]').value = conf.max_retries;
                 if (conf.bilingual !== undefined) document.querySelector('input[name="bilingual"]').checked = conf.bilingual;
+                if (conf.completion_chime !== undefined) completionChimeInput.checked = conf.completion_chime;
             }
         } catch (e) {
             console.warn("Failed to load history", e);
@@ -156,6 +161,79 @@ document.addEventListener('DOMContentLoaded', () => {
         terminalLog.scrollTop = terminalLog.scrollHeight;
     }
 
+    function ensureAudioContext() {
+        if (audioContext) return audioContext;
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        if (!Ctx) return null;
+        audioContext = new Ctx();
+        return audioContext;
+    }
+
+    async function unlockAudioContext() {
+        const ctx = ensureAudioContext();
+        if (!ctx) return;
+        if (ctx.state === 'suspended') {
+            try {
+                await ctx.resume();
+            } catch (_) {
+                return;
+            }
+        }
+    }
+
+    function playCompletionChime(taskId) {
+        if (!completionChimeInput.checked) return;
+        if (chimePlayedTaskId === taskId) return;
+        const ctx = ensureAudioContext();
+        if (!ctx || ctx.state !== 'running') return;
+        const schedule = [
+            { freq: 880, start: 0, duration: 0.12 },
+            { freq: 1174, start: 0.14, duration: 0.12 },
+            { freq: 1568, start: 0.28, duration: 0.2 }
+        ];
+        const volume = 0.12;
+        const begin = ctx.currentTime;
+        schedule.forEach((note) => {
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.type = 'sine';
+            osc.frequency.value = note.freq;
+            gain.gain.setValueAtTime(0.0001, begin + note.start);
+            gain.gain.exponentialRampToValueAtTime(volume, begin + note.start + 0.01);
+            gain.gain.exponentialRampToValueAtTime(0.0001, begin + note.start + note.duration);
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            osc.start(begin + note.start);
+            osc.stop(begin + note.start + note.duration + 0.02);
+        });
+        chimePlayedTaskId = taskId;
+    }
+
+    function formatHHMMSS(seconds) {
+        const safe = Math.max(0, Number.isFinite(seconds) ? Math.floor(seconds) : 0);
+        const h = String(Math.floor(safe / 3600)).padStart(2, '0');
+        const m = String(Math.floor((safe % 3600) / 60)).padStart(2, '0');
+        const s = String(safe % 60).padStart(2, '0');
+        return `${h}:${m}:${s}`;
+    }
+
+    function updateTimeStats(data) {
+        const elapsedText = document.getElementById('elapsedText');
+        const etaText = document.getElementById('etaText');
+        const elapsedSec = Number(data.elapsed_sec);
+        elapsedText.textContent = `已用时 ${formatHHMMSS(elapsedSec)}`;
+        if (data.status === 'completed') {
+            etaText.textContent = '预计剩余 00:00:00';
+            return;
+        }
+        const etaSec = Number(data.eta_sec);
+        if (Number.isFinite(etaSec) && etaSec >= 0) {
+            etaText.textContent = `预计剩余 ${formatHHMMSS(etaSec)}`;
+            return;
+        }
+        etaText.textContent = '预计剩余 计算中...';
+    }
+
     // Fetch Explanation Function
     async function fetchExplanation() {
         if (!currentFile) return;
@@ -228,6 +306,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Start Translation
     startBtn.addEventListener('click', async () => {
         if (!currentFile) return;
+        await unlockAudioContext();
 
         // Parse Form
         const formData = new FormData(configForm);
@@ -263,9 +342,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
         startBtn.disabled = true;
         startBtn.textContent = '翻译中...';
+        chimePlayedTaskId = '';
         document.getElementById('statusBadge').textContent = '执行中';
         document.getElementById('statusBadge').style.backgroundColor = 'rgba(248, 81, 73, 0.1)';
         document.getElementById('statusBadge').style.color = 'var(--text-red)';
+        document.getElementById('elapsedText').textContent = '已用时 00:00:00';
+        document.getElementById('etaText').textContent = '预计剩余 计算中...';
 
         document.getElementById('statsDashboard').classList.add('hidden');
         document.getElementById('downloadFailuresBtn').classList.add('hidden');
@@ -314,6 +396,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 document.getElementById('progressPercent').textContent = `${percent}%`;
                 document.getElementById('progressText').textContent = `${data.current} / ${data.total} 块`;
             }
+            updateTimeStats(data);
 
             // Append Log Message
             if (data.message) {
@@ -325,6 +408,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 eventSource.close();
                 log('🎉 翻译任务圆满完成！', 'green');
                 showToast('翻译完成，可以下载了！', 'success');
+                playCompletionChime(taskId);
 
                 document.getElementById('statusBadge').textContent = '已完成';
                 document.getElementById('statusBadge').style.backgroundColor = 'rgba(35, 134, 54, 0.1)';

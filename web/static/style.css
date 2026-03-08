@@ -330,6 +330,14 @@ input:checked + .slider:before {
   color: var(--text-muted);
 }
 
+.progress-time-stats {
+  margin-top: 8px;
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
 /* Terminal Log */
 .terminal-log {
   background-color: #0d1117;

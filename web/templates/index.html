@@ -83,6 +83,13 @@ Demand=需求</textarea>
               <span class="slider round"></span>
             </label>
           </div>
+          <div class="form-group toggle-group">
+            <label>完成提示音</label>
+            <label class="switch">
+              <input type="checkbox" name="completion_chime" checked />
+              <span class="slider round"></span>
+            </label>
+          </div>
         </div>
       </form>
     </aside>
@@ -130,6 +137,10 @@ Demand=需求</textarea>
               <div class="flex-between progress-stats">
                 <span id="progressPercent">0%</span>
                 <span id="progressText">0 / 0 块</span>
+              </div>
+              <div class="progress-time-stats">
+                <span id="elapsedText">已用时 00:00:00</span>
+                <span id="etaText">预计剩余 计算中...</span>
               </div>
             </div>
 
