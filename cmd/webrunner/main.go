@@ -265,6 +265,9 @@ func handleProgressSSE(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
 	// Keep connection open and send logs over SSE
 	for {
 		select {
@@ -281,15 +284,8 @@ func handleProgressSSE(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		case <-r.Context().Done():
-			// Client disconnected
-			mu.Lock()
-			if task.Status == "running" {
-				task.Status = "disconnected"
-				saveTaskState(task)
-			}
-			mu.Unlock()
 			return
-		case <-time.After(5 * time.Second):
+		case <-ticker.C:
 			fmt.Fprintf(w, "data: {\"type\": \"heartbeat\"}\n\n")
 			flusher.Flush()
 		}

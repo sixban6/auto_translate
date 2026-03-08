@@ -402,10 +402,10 @@ document.addEventListener('DOMContentLoaded', () => {
         }, 5000);
 
         eventSource.onmessage = (e) => {
+            lastHeartbeat = Date.now(); // Any message counts as a connection indicator
             const data = JSON.parse(e.data);
 
             if (data.type === 'heartbeat') {
-                lastHeartbeat = Date.now();
                 return;
             }
 
