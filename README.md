@@ -19,14 +19,19 @@ ollama pull translategemma:12b
 在项目根目录执行：
 
 ```bash
-go run ./cmd/webrunner/main.go
+chmod +x start.sh
+bash start.sh
 ```
 
 启动成功后, 会自动打开浏览器，显示翻译程序
 
-
 ![img_1.png](img_1.png)
 
+停止程序
+```bash
+chmod +x start.sh
+bash stop.sh
+```
 
 ## 二、扩展翻译角色
 
