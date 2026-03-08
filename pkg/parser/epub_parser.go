@@ -102,6 +102,10 @@ func (p *EpubParser) Assemble(blocks []TranslatedBlock, outputPath string, bilin
 		if !ok || strings.TrimSpace(translated) == "" {
 			continue // skip empty
 		}
+		if strings.TrimSpace(translated) == "<!--merged-->" {
+			tNode.Data = ""
+			continue
+		}
 
 		if bilingual {
 			// Construct: translated <br> original

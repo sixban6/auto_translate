@@ -107,4 +107,7 @@ func TestIntegrationEpubSample(t *testing.T) {
 			t.Fatalf("Output missing expected content: %s", expected)
 		}
 	}
+	if strings.Contains(htmlContent, "<!--merged-->") {
+		t.Fatalf("Output should not leak internal merge marker")
+	}
 }
