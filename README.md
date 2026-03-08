@@ -2,7 +2,7 @@
 
 本项目是一个完全本地运行的翻译工具，支持 WebUI 交互式翻译与角色化 System Prompt 扩展。
 
-## 启动与使用 WebUI 翻译
+## 一、启动与使用 WebUI 翻译
 
 ### 1. 环境要求
 
@@ -22,26 +22,13 @@ ollama pull translategemma:12b
 go run ./cmd/webrunner/main.go
 ```
 
-启动成功后打开浏览器访问：输出的地址
+启动成功后, 会自动打开浏览器，显示翻译程序
 
-```
-> $ go run cmd/webrunner/main.go                                                                                                                      [±main ●●●]
-Web server is running beautifully at http://localhost:4002
-
-```
 
 ![img.png](img.png)
 
-### 3. 使用流程
 
-- 选择模型与 API 地址
-- 选择翻译专家角色
-- 设定重试超时与重试次数
-- 上传 .epub 或 .txt 文件
-- 点击开始执行翻译
-- 任务完成后点击下载译本
-
-## 扩展翻译角色
+## 二、扩展翻译角色
 
 系统会自动加载 prompts 目录下的所有 Markdown 文件作为“翻译专家”角色，文件名即为角色名称。
 
