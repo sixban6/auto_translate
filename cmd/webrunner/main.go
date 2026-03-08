@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"auto_translate/pkg/config"
+	"auto_translate/pkg/keepalive"
 	"auto_translate/pkg/parser"
 	"auto_translate/pkg/processor"
 	"auto_translate/pkg/translator"
@@ -24,17 +25,52 @@ import (
 )
 
 type TranslationTask struct {
-	ID        string
-	Status    string
-	Total     int
-	Current   int
-	Config    *config.Config
-	InputPath string
-	OutPath   string
-	MessageCh chan webtask.LogMsg
-	Error     string
-	Stats     processor.TranslationStats
-	StartedAt time.Time
+	ID              string
+	Status          string
+	Total           int
+	Current         int
+	Config          *config.Config
+	InputPath       string
+	OutPath         string
+	MessageCh       chan webtask.LogMsg
+	Error           string
+	Stats           processor.TranslationStats
+	StartedAt       time.Time
+	CompletedChunks map[string]string
+	StateMu         sync.Mutex
+}
+
+type TaskState struct {
+	ID              string                     `json:"id"`
+	Total           int                        `json:"total"`
+	Current         int                        `json:"current"`
+	Status          string                     `json:"status"`
+	InputPath       string                     `json:"input_path"`
+	OutPath         string                     `json:"out_path"`
+	Config          *config.Config             `json:"config"`
+	CompletedChunks map[string]string          `json:"completed_chunks"`
+	Stats           processor.TranslationStats `json:"stats"`
+}
+
+func saveTaskState(t *TranslationTask) {
+	t.StateMu.Lock()
+	defer t.StateMu.Unlock()
+
+	state := TaskState{
+		ID:              t.ID,
+		Total:           t.Total,
+		Current:         t.Current,
+		Status:          t.Status,
+		InputPath:       t.InputPath,
+		OutPath:         t.OutPath,
+		Config:          t.Config,
+		CompletedChunks: t.CompletedChunks,
+		Stats:           t.Stats,
+	}
+
+	statePath := t.InputPath + ".state.json"
+	data, _ := json.MarshalIndent(state, "", "  ")
+	os.WriteFile(statePath, data, 0644)
 }
 
 var (
@@ -77,6 +113,8 @@ func main() {
 	http.HandleFunc("/api/download_failures", handleDownloadFailures)
 	// API Endpoint: Get Task Status and Stats
 	http.HandleFunc("/api/task_status", handleTaskStatus)
+	// API Endpoint: Resume Task
+	http.HandleFunc("/api/resume", handleResume)
 
 	port := getAvailablePort(4000)
 	fmt.Printf("Web server is running beautifully at http://localhost:%d\n", port)
@@ -185,12 +223,13 @@ func handleTranslateStart(w http.ResponseWriter, r *http.Request) {
 
 	// Create Task Tracker
 	task := &TranslationTask{
-		ID:        taskID,
-		Status:    "running",
-		Config:    &cfg,
-		InputPath: inputPath,
-		OutPath:   outPath,
-		MessageCh: make(chan webtask.LogMsg, 100),
+		ID:              taskID,
+		Status:          "running",
+		Config:          &cfg,
+		InputPath:       inputPath,
+		OutPath:         outPath,
+		MessageCh:       make(chan webtask.LogMsg, 100),
+		CompletedChunks: make(map[string]string),
 	}
 
 	mu.Lock()
@@ -243,7 +282,16 @@ func handleProgressSSE(w http.ResponseWriter, r *http.Request) {
 			}
 		case <-r.Context().Done():
 			// Client disconnected
+			mu.Lock()
+			if task.Status == "running" {
+				task.Status = "disconnected"
+				saveTaskState(task)
+			}
+			mu.Unlock()
 			return
+		case <-time.After(5 * time.Second):
+			fmt.Fprintf(w, "data: {\"type\": \"heartbeat\"}\n\n")
+			flusher.Flush()
 		}
 	}
 }
@@ -307,15 +355,97 @@ func handleTaskStatus(w http.ResponseWriter, r *http.Request) {
 	mu.Unlock()
 
 	if !ok {
+		// Try to recover from disk
+		files, _ := filepath.Glob(filepath.Join("temp_uploads", taskID+"*.state.json"))
+		if len(files) > 0 {
+			var state TaskState
+			data, err := os.ReadFile(files[0])
+			if err == nil && json.Unmarshal(data, &state) == nil {
+				if state.Status == "running" {
+					state.Status = "disconnected"
+				}
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"status":           state.Status,
+					"stats":            state.Stats,
+					"resume_supported": true,
+				})
+				return
+			}
+		}
 		http.Error(w, "Task not found", http.StatusNotFound)
 		return
 	}
 
+	statePath := task.InputPath + ".state.json"
+	_, err := os.Stat(statePath)
+	resumeSupported := err == nil && (task.Status == "error" || task.Status == "disconnected")
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status": task.Status,
-		"stats":  task.Stats,
+		"status":           task.Status,
+		"stats":            task.Stats,
+		"resume_supported": resumeSupported,
 	})
+}
+
+func handleResume(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	taskID := r.URL.Query().Get("task_id")
+	mu.Lock()
+	t, ok := tasks[taskID]
+	mu.Unlock()
+
+	var state TaskState
+	if !ok {
+		files, _ := filepath.Glob(filepath.Join("temp_uploads", taskID+"*.state.json"))
+		if len(files) == 0 {
+			http.Error(w, "State not found", http.StatusNotFound)
+			return
+		}
+		data, err := os.ReadFile(files[0])
+		if err != nil {
+			http.Error(w, "Failed to read state", http.StatusInternalServerError)
+			return
+		}
+		if err := json.Unmarshal(data, &state); err != nil {
+			http.Error(w, "Failed to parse state", http.StatusInternalServerError)
+			return
+		}
+
+		t = &TranslationTask{
+			ID:              state.ID,
+			Status:          "disconnected",
+			Total:           state.Total,
+			Current:         state.Current,
+			Config:          state.Config,
+			InputPath:       state.InputPath,
+			OutPath:         state.OutPath,
+			CompletedChunks: state.CompletedChunks,
+			Stats:           state.Stats,
+		}
+
+		mu.Lock()
+		tasks[taskID] = t
+		mu.Unlock()
+	}
+
+	if t.Status == "running" {
+		http.Error(w, "Task is already running", http.StatusConflict)
+		return
+	}
+
+	t.Status = "running"
+	t.Error = ""
+	t.MessageCh = make(chan webtask.LogMsg, 100)
+
+	go runTranslationTask(t)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"task_id": t.ID, "status": "resumed"})
 }
 
 func handleModels(w http.ResponseWriter, r *http.Request) {
@@ -436,6 +566,7 @@ func handleExplainConfig(w http.ResponseWriter, r *http.Request) {
 
 // Background Task Runner
 func runTranslationTask(t *TranslationTask) {
+	defer keepalive.PreventSleep()()
 	defer close(t.MessageCh)
 	startTime := time.Now()
 	t.StartedAt = startTime
@@ -502,8 +633,9 @@ func runTranslationTask(t *TranslationTask) {
 	proc := processor.New(t.Config, tr)
 
 	sendLog(fmt.Sprintf("引擎已并发启动 (Concurrency = %d). 请耐心等待...", t.Config.Concurrency), "gray")
+	saveTaskState(t)
 
-	translatedBlocks, stats, err := proc.Process(blocks, func(current, total int, msg string) {
+	translatedBlocks, stats, err := proc.Process(blocks, t.CompletedChunks, func(current, total int, msg string) {
 		t.Total = total
 		if current >= 0 {
 			t.Current = current
@@ -527,6 +659,14 @@ func runTranslationTask(t *TranslationTask) {
 			ElapsedSec: int(time.Since(startTime).Seconds()),
 			EtaSec:     etaEstimator.Estimate(t.Current, total, time.Since(startTime)),
 		}
+	}, func(chunkID, translatedText string) {
+		t.StateMu.Lock()
+		if t.CompletedChunks == nil {
+			t.CompletedChunks = make(map[string]string)
+		}
+		t.CompletedChunks[chunkID] = translatedText
+		t.StateMu.Unlock()
+		saveTaskState(t)
 	})
 	if err != nil {
 		fail(err)

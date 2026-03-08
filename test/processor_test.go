@@ -72,29 +72,29 @@ func TestProcessor(t *testing.T) {
 	}
 
 	start := time.Now()
-	res, _, err := proc.Process(blocks, nil)
+	translatedBlocks, _, err := proc.Process(blocks, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Process error: %v", err)
 	}
 	elapsed := time.Since(start)
 	t.Logf("Processing took %v", elapsed)
 
-	if len(res) != 3 {
-		t.Fatalf("Expected 3 results, got %d", len(res))
+	if len(translatedBlocks) != 3 {
+		t.Fatalf("Expected 3 results, got %d", len(translatedBlocks))
 	}
 
 	// Verify ID preservation
-	if res[0].ID != "1" || res[1].ID != "2" || res[2].ID != "3" {
+	if translatedBlocks[0].ID != "1" || translatedBlocks[1].ID != "2" || translatedBlocks[2].ID != "3" {
 		t.Errorf("ID mapping failed")
 	}
 
 	// Verification
-	if !strings.Contains(res[0].TranslatedText, "[T]A") {
-		t.Errorf("First text chunk failed: %s", res[0].TranslatedText)
+	if !strings.Contains(translatedBlocks[0].TranslatedText, "[T]A") {
+		t.Errorf("First text chunk failed: %s", translatedBlocks[0].TranslatedText)
 	}
 
-	if !strings.Contains(res[2].TranslatedText, "[T]C") {
-		t.Errorf("Third chunk failed: %s", res[2].TranslatedText)
+	if !strings.Contains(translatedBlocks[2].TranslatedText, "[T]C") {
+		t.Errorf("Third chunk failed: %s", translatedBlocks[2].TranslatedText)
 	}
 }
 
@@ -120,22 +120,22 @@ func TestProcessor_Fallback(t *testing.T) {
 	}
 
 	warningReceived := false
-	res, _, err := proc.Process(blocks, func(current, total int, msg string) {
+	translatedBlocks, _, err := proc.Process(blocks, nil, func(current, total int, msg string) {
 		if strings.Contains(msg, "降级为原文保留") || strings.Contains(msg, "fallback") {
 			warningReceived = true
 		}
-	})
+	}, nil)
 
 	if err != nil {
 		t.Fatalf("Expected no error due to fallback, got %v", err)
 	}
 
-	if len(res) != 1 {
-		t.Fatalf("Expected 1 result block, got %d", len(res))
+	if len(translatedBlocks) != 1 {
+		t.Fatalf("Expected 1 result block, got %d", len(translatedBlocks))
 	}
 
-	if res[0].TranslatedText != "Fail me" {
-		t.Errorf("Fallback failed, expected original text, got %q", res[0].TranslatedText)
+	if translatedBlocks[0].TranslatedText != "Fail me" {
+		t.Errorf("Fallback failed, expected original text, got %q", translatedBlocks[0].TranslatedText)
 	}
 
 	if !warningReceived {
@@ -183,11 +183,11 @@ func TestProcessor_ConcurrencyQueueTimeout(t *testing.T) {
 	}
 
 	timeoutCount := 0
-	_, _, err := proc.Process(blocks, func(current, total int, msg string) {
+	_, _, err := proc.Process(blocks, nil, func(current, total int, msg string) {
 		if strings.Contains(msg, "context deadline exceeded") || strings.Contains(msg, "Client.Timeout exceeded") || strings.Contains(msg, "API request failed") || strings.Contains(msg, "Retrying") || strings.Contains(msg, "完全失败") {
 			timeoutCount++
 		}
-	})
+	}, nil)
 
 	if err != nil {
 		t.Fatalf("Process shouldn't return error due to fallback: %v", err)

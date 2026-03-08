@@ -12,6 +12,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     let currentFile = null;
     let eventSource = null;
+    let heartbeatInterval = null;
     let audioContext = null;
     let chimePlayedTaskId = '';
 
@@ -349,6 +350,9 @@ document.addEventListener('DOMContentLoaded', () => {
         document.getElementById('elapsedText').textContent = '已用时 00:00:00';
         document.getElementById('etaText').textContent = '预计剩余 计算中...';
 
+        const rBtn = document.getElementById('resumeBtn');
+        if (rBtn) rBtn.classList.add('hidden');
+
         document.getElementById('statsDashboard').classList.add('hidden');
         document.getElementById('downloadFailuresBtn').classList.add('hidden');
         downloadBtn.classList.add('hidden');
@@ -383,11 +387,27 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function listenToProgress(taskId) {
         if (eventSource) eventSource.close();
+        if (heartbeatInterval) clearInterval(heartbeatInterval);
 
         eventSource = new EventSource(`/api/progress?task_id=${taskId}`);
+        let lastHeartbeat = Date.now();
+
+        heartbeatInterval = setInterval(() => {
+            if (Date.now() - lastHeartbeat > 15000) {
+                console.warn("Heartbeat timeout, disconnecting...");
+                clearInterval(heartbeatInterval);
+                if (eventSource) eventSource.close();
+                handleDisconnect(taskId);
+            }
+        }, 5000);
 
         eventSource.onmessage = (e) => {
             const data = JSON.parse(e.data);
+
+            if (data.type === 'heartbeat') {
+                lastHeartbeat = Date.now();
+                return;
+            }
 
             // Update Progress Bar
             if (data.total > 0) {
@@ -405,6 +425,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // Handle Completion
             if (data.status === 'completed') {
+                clearInterval(heartbeatInterval);
                 eventSource.close();
                 log('🎉 翻译任务圆满完成！', 'green');
                 showToast('翻译完成，可以下载了！', 'success');
@@ -445,23 +466,91 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // Handle Error
             if (data.status === 'error') {
+                clearInterval(heartbeatInterval);
                 eventSource.close();
                 showToast('翻译过程中断', 'error');
-                resetUI();
+                handleDisconnect(taskId);
             }
         };
 
         eventSource.onerror = (e) => {
             console.error("SSE Error", e);
+            clearInterval(heartbeatInterval);
             eventSource.close();
-            log('无法连接到日志服务器', 'red');
-            resetUI();
+            log('连接丢失或无法连接到日志服务器', 'orange');
+            handleDisconnect(taskId);
         };
+    }
+
+    async function handleDisconnect(taskId) {
+        log('连接已断开，尝试获取任务状态...', 'orange');
+        document.getElementById('statusBadge').textContent = '连接断开';
+        document.getElementById('statusBadge').style.backgroundColor = 'rgba(210, 153, 34, 0.1)';
+        document.getElementById('statusBadge').style.color = '#d29922';
+
+        try {
+            const res = await fetch(`/api/task_status?task_id=${taskId}`);
+            if (res.ok) {
+                const data = await res.json();
+                if (data.resume_supported) {
+                    showResumeButton(taskId);
+                    return;
+                }
+            }
+            resetUI();
+        } catch (e) {
+            resetUI();
+        }
+    }
+
+    function showResumeButton(taskId) {
+        startBtn.classList.add('hidden');
+        let rBtn = document.getElementById('resumeBtn');
+        if (!rBtn) {
+            rBtn = document.createElement('button');
+            rBtn.id = 'resumeBtn';
+            rBtn.className = 'btn-primary';
+            rBtn.textContent = '断点重试 (Resume)';
+            rBtn.onclick = async () => {
+                rBtn.disabled = true;
+                rBtn.textContent = '恢复中...';
+                try {
+                    const res = await fetch(`/api/resume?task_id=${taskId}`, { method: 'POST' });
+                    if (!res.ok) throw new Error(await res.text());
+
+                    log('任务已恢复，正在重新连接进度流...', 'green');
+                    rBtn.classList.add('hidden');
+                    startBtn.classList.remove('hidden');
+                    startBtn.disabled = true;
+                    startBtn.textContent = '翻译中...';
+
+                    document.getElementById('statusBadge').textContent = '执行中';
+                    document.getElementById('statusBadge').style.backgroundColor = 'rgba(248, 81, 73, 0.1)';
+                    document.getElementById('statusBadge').style.color = 'var(--text-red)';
+
+                    listenToProgress(taskId);
+                } catch (e) {
+                    showToast('恢复失败: ' + e.message, 'error');
+                    rBtn.disabled = false;
+                    rBtn.textContent = '断点重试 (Resume)';
+                }
+            };
+            startBtn.parentNode.appendChild(rBtn);
+        } else {
+            rBtn.classList.remove('hidden');
+            rBtn.disabled = false;
+            rBtn.textContent = '断点重试 (Resume)';
+        }
     }
 
     function resetUI() {
         startBtn.disabled = false;
         startBtn.textContent = '重新执行';
+        startBtn.classList.remove('hidden');
+        const rBtn = document.getElementById('resumeBtn');
+        if (rBtn) rBtn.classList.add('hidden');
         document.getElementById('statusBadge').textContent = '已中断';
+        document.getElementById('statusBadge').style.backgroundColor = 'rgba(248, 81, 73, 0.1)';
+        document.getElementById('statusBadge').style.color = 'var(--text-red)';
     }
 });

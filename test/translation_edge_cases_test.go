@@ -135,16 +135,15 @@ func TestChunkAggregation_ShortTexts(t *testing.T) {
 		{ID: "ch1.html_node_3", OriginalText: "This is a long sentence that should not be merged because it's long enough. It actually has some meat to it."},
 	}
 
-	translated, _, err := proc.Process(blocks, nil)
+	translatedBlocks, _, err := proc.Process(blocks, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Process error: %v", err)
 	}
 
-	// We expect ch1.html_node_1 to contain the translated merged text: "Translated: Chapter 1 Introduction"
 	// and node_2 to have a special skip token or be handled such that it doesn't cause issues.
 	// We'll check the Output blocks.
 	transMap := make(map[string]string)
-	for _, b := range translated {
+	for _, b := range translatedBlocks {
 		t.Logf("Result ID: %s, Text: %q", b.ID, b.TranslatedText)
 		transMap[b.ID] = b.TranslatedText
 	}

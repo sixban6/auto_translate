@@ -57,7 +57,7 @@ func getFilePrefix(id string) string {
 }
 
 // Process handles chunking, concurrent translation, and reassembly.
-func (p *Processor) Process(blocks []parser.TextBlock, onProgress func(int, int, string)) ([]parser.TranslatedBlock, TranslationStats, error) {
+func (p *Processor) Process(blocks []parser.TextBlock, stateMap map[string]string, onProgress func(int, int, string), onChunkCompleted func(string, string)) ([]parser.TranslatedBlock, TranslationStats, error) {
 	var stats TranslationStats
 
 	// 0. Pre-processing (Context Aggregation for short texts)
@@ -142,7 +142,14 @@ func (p *Processor) Process(blocks []parser.TextBlock, onProgress func(int, int,
 
 	// Dispatch jobs
 	for j := range subChunks {
-		jobs <- j
+		chunkID := fmt.Sprintf("%s-%d", subChunks[j].BlockID, subChunks[j].SubIndex)
+		if stateMap != nil && stateMap[chunkID] != "" {
+			subChunks[j].Translated = stateMap[chunkID]
+			subChunks[j].Status = translator.StatusSuccess
+			results <- j
+		} else {
+			jobs <- j
+		}
 	}
 	close(jobs)
 
@@ -170,6 +177,13 @@ func (p *Processor) Process(blocks []parser.TextBlock, onProgress func(int, int,
 				msg = fmt.Sprintf("❌ [分块 %s-%d] 翻译完全失败，准备降级容错。", sc.BlockID, sc.SubIndex)
 			}
 			onProgress(completedCount, totalJobs, msg)
+		}
+
+		if sc.Err == nil && sc.Status == translator.StatusSuccess && onChunkCompleted != nil {
+			chunkID := fmt.Sprintf("%s-%d", sc.BlockID, sc.SubIndex)
+			if stateMap == nil || stateMap[chunkID] == "" {
+				onChunkCompleted(chunkID, sc.Translated)
+			}
 		}
 
 		// Update stats
