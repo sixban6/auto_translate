@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -45,10 +46,13 @@ type TranslationTask struct {
 	InstanceID      string
 	LastHeartbeat   time.Time
 	StatusReason    string
-	OriginalFilename string
+	SrcFileName     string
 	Ctx             context.Context
 	Cancel          context.CancelFunc
 	StateMu         sync.Mutex
+	LastResumeAt    time.Time
+	ElapsedSecAccumulated int64
+	DoneCh          chan struct{}
 }
 
 type TaskState struct {
@@ -64,10 +68,17 @@ type TaskState struct {
 	InstanceID      string                     `json:"instance_id"`
 	LastHeartbeatTs int64                      `json:"last_heartbeat_ts"`
 	StatusReason    string                     `json:"status_reason"`
-	OriginalFilename string                    `json:"original_filename"`
+	SrcFileName     string                    `json:"src_file_name"`
+	StartedAt       int64                      `json:"started_at"`
+	LastResumeAt    int64                      `json:"last_resume_at"`
+	ElapsedSecAccumulated int64               `json:"elapsed_sec_accumulated"`
+	OriginalFilename string                   `json:"original_filename,omitempty"`
 }
 
 func saveTaskState(t *TranslationTask) {
+	if t.Status == "deleted" {
+		return
+	}
 	t.StateMu.Lock()
 	defer t.StateMu.Unlock()
 
@@ -88,12 +99,98 @@ func saveTaskState(t *TranslationTask) {
 		InstanceID:      t.InstanceID,
 		LastHeartbeatTs: lastHeartbeat.Unix(),
 		StatusReason:    t.StatusReason,
-		OriginalFilename: t.OriginalFilename,
+		SrcFileName:     t.SrcFileName,
+		StartedAt:       unixOrZero(t.StartedAt),
+		LastResumeAt:    unixOrZero(t.LastResumeAt),
+		ElapsedSecAccumulated: t.ElapsedSecAccumulated,
 	}
 
 	statePath := t.InputPath + ".state.json"
 	data, _ := json.MarshalIndent(state, "", "  ")
 	os.WriteFile(statePath, data, 0644)
+}
+
+func unixOrZero(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.Unix()
+}
+
+func normalizeState(state *TaskState) {
+	if state.SrcFileName == "" && state.OriginalFilename != "" {
+		state.SrcFileName = state.OriginalFilename
+	}
+}
+
+func computeEtaSec(current, total int, elapsedSec int64) int {
+	if total <= 0 || current <= 0 {
+		return -1
+	}
+	if current >= total {
+		return 0
+	}
+	if elapsedSec <= 0 {
+		return -1
+	}
+	speed := float64(elapsedSec) / float64(current)
+	if speed <= 0 {
+		return -1
+	}
+	remaining := total - current
+	if remaining < 0 {
+		remaining = 0
+	}
+	eta := int(math.Ceil(speed * float64(remaining)))
+	if eta < 0 {
+		return 0
+	}
+	if eta > 86400 {
+		return 86400
+	}
+	return eta
+}
+
+func currentElapsedSec(t *TranslationTask, now time.Time) int64 {
+	elapsed := t.ElapsedSecAccumulated
+	if !t.LastResumeAt.IsZero() {
+		delta := now.Sub(t.LastResumeAt)
+		if delta > 0 {
+			elapsed += int64(delta.Seconds())
+		}
+	}
+	if elapsed < 0 {
+		return 0
+	}
+	return elapsed
+}
+
+func stateElapsedSec(state TaskState, now time.Time, status string) int64 {
+	elapsed := state.ElapsedSecAccumulated
+	if status == "running" && state.LastResumeAt > 0 {
+		delta := now.Unix() - state.LastResumeAt
+		if delta > 0 {
+			elapsed += delta
+		}
+	}
+	if elapsed < 0 {
+		return 0
+	}
+	return elapsed
+}
+
+func accumulateElapsed(t *TranslationTask, now time.Time) {
+	if t.LastResumeAt.IsZero() {
+		return
+	}
+	delta := now.Sub(t.LastResumeAt)
+	if delta > 0 {
+		t.ElapsedSecAccumulated += int64(delta.Seconds())
+	}
+	t.LastResumeAt = time.Time{}
+	if t.ElapsedSecAccumulated < 0 {
+		t.ElapsedSecAccumulated = 0
+	}
 }
 
 func safeSendTaskMessage(t *TranslationTask, msg webtask.LogMsg) {
@@ -161,6 +258,7 @@ func main() {
 	http.HandleFunc("/api/resume", handleResume)
 	// API Endpoint: List Tasks
 	http.HandleFunc("/api/tasks", handleTasks)
+	http.HandleFunc("/api/tasks/", handleTaskByID)
 	// API Endpoint: Pause Task
 	http.HandleFunc("/api/pause", handlePause)
 
@@ -279,7 +377,8 @@ func handleTranslateStart(w http.ResponseWriter, r *http.Request) {
 		MessageCh:       make(chan webtask.LogMsg, 100),
 		CompletedChunks: make(map[string]string),
 		InstanceID:      instanceID,
-		OriginalFilename: header.Filename,
+		SrcFileName:     header.Filename,
+		DoneCh:          make(chan struct{}),
 	}
 	task.LastHeartbeat = time.Now()
 	task.StatusReason = "queued"
@@ -418,13 +517,19 @@ func handleTaskStatus(w http.ResponseWriter, r *http.Request) {
 			var state TaskState
 			data, err := os.ReadFile(files[0])
 			if err == nil && json.Unmarshal(data, &state) == nil {
+				normalizeState(&state)
 				status, resumeSupported, reason := resolveTaskState(state)
+				elapsedSec := stateElapsedSec(state, time.Now(), status)
+				etaSec := computeEtaSec(state.Current, state.Total, elapsedSec)
 				w.Header().Set("Content-Type", "application/json")
 				json.NewEncoder(w).Encode(map[string]interface{}{
 					"status":           status,
 					"stats":            state.Stats,
 					"resume_supported": resumeSupported,
 					"status_reason":    reason,
+					"elapsed_sec":      elapsedSec,
+					"eta_sec":          etaSec,
+					"src_file_name":    state.SrcFileName,
 				})
 				return
 			}
@@ -436,11 +541,16 @@ func handleTaskStatus(w http.ResponseWriter, r *http.Request) {
 	resumeSupported := task.Status == "error" || task.Status == "disconnected" || task.Status == "interrupted" || task.Status == "paused"
 
 	w.Header().Set("Content-Type", "application/json")
+	elapsedSec := currentElapsedSec(task, time.Now())
+	etaSec := computeEtaSec(task.Current, task.Total, elapsedSec)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":           task.Status,
 		"stats":            task.Stats,
 		"resume_supported": resumeSupported,
 		"status_reason":    task.StatusReason,
+		"elapsed_sec":      elapsedSec,
+		"eta_sec":          etaSec,
+		"src_file_name":    task.SrcFileName,
 	})
 }
 
@@ -470,6 +580,7 @@ func handleResume(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Failed to parse state", http.StatusInternalServerError)
 			return
 		}
+		normalizeState(&state)
 		status, _, _ := resolveTaskState(state)
 		state.Status = status
 
@@ -485,6 +596,15 @@ func handleResume(w http.ResponseWriter, r *http.Request) {
 			Stats:           state.Stats,
 			InstanceID:      instanceID,
 			StatusReason:    state.StatusReason,
+			SrcFileName:     state.SrcFileName,
+			ElapsedSecAccumulated: state.ElapsedSecAccumulated,
+			DoneCh:          make(chan struct{}),
+		}
+		if state.StartedAt > 0 {
+			t.StartedAt = time.Unix(state.StartedAt, 0)
+		}
+		if state.LastResumeAt > 0 {
+			t.LastResumeAt = time.Unix(state.LastResumeAt, 0)
 		}
 		t.LastHeartbeat = time.Unix(state.LastHeartbeatTs, 0)
 
@@ -559,7 +679,9 @@ func handleTasks(w http.ResponseWriter, r *http.Request) {
 		ResumeSupported bool                       `json:"resume_supported"`
 		StatusReason    string                     `json:"status_reason"`
 		Stats           processor.TranslationStats `json:"stats"`
-		OriginalFilename string                    `json:"original_filename"`
+		SrcFileName     string                     `json:"src_file_name"`
+		ElapsedSec      int64                      `json:"elapsed_sec"`
+		EtaSec          int                        `json:"eta_sec"`
 	}
 	type fileInfo struct {
 		path string
@@ -587,7 +709,10 @@ func handleTasks(w http.ResponseWriter, r *http.Request) {
 		if json.Unmarshal(data, &state) != nil {
 			continue
 		}
+		normalizeState(&state)
 		status, resumeSupported, reason := resolveTaskState(state)
+		elapsedSec := stateElapsedSec(state, time.Now(), status)
+		etaSec := computeEtaSec(state.Current, state.Total, elapsedSec)
 		summaries = append(summaries, taskSummary{
 			ID:              state.ID,
 			Status:          status,
@@ -599,13 +724,159 @@ func handleTasks(w http.ResponseWriter, r *http.Request) {
 			ResumeSupported: resumeSupported,
 			StatusReason:    reason,
 			Stats:           state.Stats,
-			OriginalFilename: state.OriginalFilename,
+			SrcFileName:     state.SrcFileName,
+			ElapsedSec:      elapsedSec,
+			EtaSec:          etaSec,
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"tasks": summaries,
 	})
+}
+
+func handleTaskByID(w http.ResponseWriter, r *http.Request) {
+	taskID := strings.TrimPrefix(r.URL.Path, "/api/tasks/")
+	if taskID == "" || strings.Contains(taskID, "/") {
+		http.Error(w, "Invalid task id", http.StatusBadRequest)
+		return
+	}
+	switch r.Method {
+	case "GET":
+		handleTaskGetByID(w, r, taskID)
+	case "DELETE":
+		handleTaskDeleteByID(w, r, taskID)
+	default:
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func handleTaskGetByID(w http.ResponseWriter, r *http.Request, taskID string) {
+	mu.Lock()
+	task, ok := tasks[taskID]
+	mu.Unlock()
+	if ok {
+		elapsedSec := currentElapsedSec(task, time.Now())
+		etaSec := computeEtaSec(task.Current, task.Total, elapsedSec)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"id":                task.ID,
+			"status":            task.Status,
+			"total":             task.Total,
+			"current":           task.Current,
+			"input_path":        task.InputPath,
+			"out_path":          task.OutPath,
+			"resume_supported":  task.Status == "error" || task.Status == "disconnected" || task.Status == "interrupted" || task.Status == "paused",
+			"status_reason":     task.StatusReason,
+			"stats":             task.Stats,
+			"src_file_name":     task.SrcFileName,
+			"elapsed_sec":       elapsedSec,
+			"eta_sec":           etaSec,
+		})
+		return
+	}
+	files, _ := filepath.Glob(filepath.Join("temp_uploads", taskID+"*.state.json"))
+	if len(files) == 0 {
+		http.Error(w, "Task not found", http.StatusNotFound)
+		return
+	}
+	var state TaskState
+	data, err := os.ReadFile(files[0])
+	if err != nil || json.Unmarshal(data, &state) != nil {
+		http.Error(w, "Failed to read state", http.StatusInternalServerError)
+		return
+	}
+	normalizeState(&state)
+	status, resumeSupported, reason := resolveTaskState(state)
+	elapsedSec := stateElapsedSec(state, time.Now(), status)
+	etaSec := computeEtaSec(state.Current, state.Total, elapsedSec)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"id":                state.ID,
+		"status":            status,
+		"total":             state.Total,
+		"current":           state.Current,
+		"input_path":        state.InputPath,
+		"out_path":          state.OutPath,
+		"resume_supported":  resumeSupported,
+		"status_reason":     reason,
+		"stats":             state.Stats,
+		"src_file_name":     state.SrcFileName,
+		"elapsed_sec":       elapsedSec,
+		"eta_sec":           etaSec,
+	})
+}
+
+func handleTaskDeleteByID(w http.ResponseWriter, r *http.Request, taskID string) {
+	var inputPath string
+	var outPath string
+	var doneCh chan struct{}
+	var status string
+
+	mu.Lock()
+	task, ok := tasks[taskID]
+	if ok {
+		status = task.Status
+		inputPath = task.InputPath
+		outPath = task.OutPath
+		doneCh = task.DoneCh
+		task.Status = "deleted"
+		task.StatusReason = "deleted"
+	}
+	mu.Unlock()
+
+	if ok && status == "running" {
+		if task.Cancel != nil {
+			task.Cancel()
+		}
+		if doneCh != nil {
+			select {
+			case <-doneCh:
+			case <-time.After(10 * time.Second):
+			}
+		}
+	}
+
+	if !ok {
+		files, _ := filepath.Glob(filepath.Join("temp_uploads", taskID+"*.state.json"))
+		if len(files) > 0 {
+			var state TaskState
+			data, err := os.ReadFile(files[0])
+			if err == nil && json.Unmarshal(data, &state) == nil {
+				normalizeState(&state)
+				inputPath = state.InputPath
+				outPath = state.OutPath
+			}
+		}
+	}
+
+	deleteTaskFiles(taskID, inputPath, outPath)
+
+	mu.Lock()
+	delete(tasks, taskID)
+	mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"task_id": taskID, "status": "deleted"})
+}
+
+func deleteTaskFiles(taskID, inputPath, outPath string) {
+	paths := make(map[string]struct{})
+	if inputPath != "" {
+		paths[inputPath] = struct{}{}
+		paths[inputPath+".state.json"] = struct{}{}
+	}
+	if outPath != "" {
+		paths[outPath] = struct{}{}
+	}
+	pattern := filepath.Join("temp_uploads", taskID+"*")
+	matches, _ := filepath.Glob(pattern)
+	for _, p := range matches {
+		paths[p] = struct{}{}
+	}
+	for p := range paths {
+		os.Remove(p)
+	}
 }
 
 func handleModels(w http.ResponseWriter, r *http.Request) {
@@ -728,8 +999,15 @@ func handleExplainConfig(w http.ResponseWriter, r *http.Request) {
 func runTranslationTask(t *TranslationTask) {
 	defer keepalive.PreventSleep()()
 	defer close(t.MessageCh)
+	if t.DoneCh == nil {
+		t.DoneCh = make(chan struct{})
+	}
+	defer close(t.DoneCh)
 	startTime := time.Now()
-	t.StartedAt = startTime
+	if t.StartedAt.IsZero() {
+		t.StartedAt = startTime
+	}
+	t.LastResumeAt = startTime
 	t.Status = "running"
 	t.StatusReason = ""
 	t.InstanceID = instanceID
@@ -738,7 +1016,6 @@ func runTranslationTask(t *TranslationTask) {
 		t.Cancel()
 	}
 	t.Ctx, t.Cancel = context.WithCancel(context.Background())
-	etaEstimator := webtask.NewETAEstimator(0.25, 5)
 	heartbeatStop := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)
@@ -759,31 +1036,33 @@ func runTranslationTask(t *TranslationTask) {
 	defer close(heartbeatStop)
 
 	sendLog := func(msg, mType string) {
-		elapsedSec := 0
-		if !t.StartedAt.IsZero() {
-			elapsedSec = int(time.Since(t.StartedAt).Seconds())
-		}
+		elapsedSec := currentElapsedSec(t, time.Now())
+		etaSec := computeEtaSec(t.Current, t.Total, elapsedSec)
 		t.MessageCh <- webtask.LogMsg{
 			Type:       mType,
 			Message:    msg,
 			Total:      t.Total,
 			Current:    t.Current,
 			Status:     t.Status,
-			ElapsedSec: elapsedSec,
-			EtaSec:     etaEstimator.Estimate(t.Current, t.Total, time.Since(t.StartedAt)),
+			ElapsedSec: int(elapsedSec),
+			EtaSec:     etaSec,
 		}
 	}
 
 	fail := func(err error) {
+		accumulateElapsed(t, time.Now())
 		t.Status = "error"
 		t.StatusReason = "fatal_error"
 		t.Error = err.Error()
+		saveTaskState(t)
+		elapsedSec := currentElapsedSec(t, time.Now())
+		etaSec := computeEtaSec(t.Current, t.Total, elapsedSec)
 		t.MessageCh <- webtask.LogMsg{
 			Type:       "red",
 			Message:    fmt.Sprintf("❌ 发生严重错误: %v", err),
 			Status:     "error",
-			ElapsedSec: int(time.Since(startTime).Seconds()),
-			EtaSec:     -1,
+			ElapsedSec: int(elapsedSec),
+			EtaSec:     etaSec,
 		}
 	}
 	ext := filepath.Ext(t.Config.InputFile)
@@ -837,14 +1116,16 @@ func runTranslationTask(t *TranslationTask) {
 			mType = "green"
 		}
 
+		elapsedSec := currentElapsedSec(t, time.Now())
+		etaSec := computeEtaSec(t.Current, total, elapsedSec)
 		t.MessageCh <- webtask.LogMsg{
 			Type:       mType,
 			Message:    msg,
 			Total:      total,
 			Current:    t.Current,
 			Status:     t.Status,
-			ElapsedSec: int(time.Since(startTime).Seconds()),
-			EtaSec:     etaEstimator.Estimate(t.Current, total, time.Since(startTime)),
+			ElapsedSec: int(elapsedSec),
+			EtaSec:     etaSec,
 		}
 	}, func(chunkID, translatedText string) {
 		t.StateMu.Lock()
@@ -857,15 +1138,18 @@ func runTranslationTask(t *TranslationTask) {
 	})
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
+			accumulateElapsed(t, time.Now())
 			t.Status = "paused"
 			t.StatusReason = "paused_by_user"
 			saveTaskState(t)
+			elapsedSec := currentElapsedSec(t, time.Now())
+			etaSec := computeEtaSec(t.Current, t.Total, elapsedSec)
 			safeSendTaskMessage(t, webtask.LogMsg{
 				Type:       "orange",
 				Message:    "任务已暂停",
 				Status:     "paused",
-				ElapsedSec: int(time.Since(startTime).Seconds()),
-				EtaSec:     -1,
+				ElapsedSec: int(elapsedSec),
+				EtaSec:     etaSec,
 			})
 			return
 		}
@@ -882,20 +1166,24 @@ func runTranslationTask(t *TranslationTask) {
 		return
 	}
 
+	accumulateElapsed(t, time.Now())
 	t.Stats = stats
 	t.Status = "completed"
 	t.StatusReason = ""
+	saveTaskState(t)
 	sendLog(fmt.Sprintf("📊 翻译统计: 成功=%d 术语降级=%d 拒答=%d 完全失败=%d", stats.SuccessCount, stats.FallbackCount, stats.RefusedCount, stats.FailureCount), "gray")
 	sendLog("🎉 生成最终电子书/文档成功！", "green")
-	elapsed := time.Since(startTime)
+	elapsed := time.Duration(currentElapsedSec(t, time.Now())) * time.Second
 	sendLog(fmt.Sprintf("⏱️ 翻译总耗时: %s", formatDuration(elapsed)), "green")
 
+	elapsedSec := currentElapsedSec(t, time.Now())
+	etaSec := computeEtaSec(t.Current, t.Total, elapsedSec)
 	t.MessageCh <- webtask.LogMsg{
 		Status:     "completed",
 		Total:      t.Total,
 		Current:    t.Total,
-		ElapsedSec: int(time.Since(startTime).Seconds()),
-		EtaSec:     0,
+		ElapsedSec: int(elapsedSec),
+		EtaSec:     etaSec,
 	}
 }
 
@@ -952,7 +1240,7 @@ func resolveTaskState(state TaskState) (string, bool, string) {
 
 func taskWorker() {
 	for task := range taskQueue {
-		if task.Status == "paused" {
+		if task.Status == "paused" || task.Status == "deleted" {
 			continue
 		}
 		runTranslationTask(task)
