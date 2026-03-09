@@ -75,6 +75,11 @@ type TaskState struct {
 	OriginalFilename string                   `json:"original_filename,omitempty"`
 }
 
+const (
+	runtimeStatesDir = "temp_uploads/runtime_states"
+	historyStatesDir = "temp_uploads/history_states"
+)
+
 func saveTaskState(t *TranslationTask) {
 	if t.Status == "deleted" {
 		return
@@ -105,9 +110,15 @@ func saveTaskState(t *TranslationTask) {
 		ElapsedSecAccumulated: t.ElapsedSecAccumulated,
 	}
 
-	statePath := t.InputPath + ".state.json"
+	ensureStateDirs()
+	statePath := statePathForStatus(t.InputPath, t.Status)
 	data, _ := json.MarshalIndent(state, "", "  ")
 	os.WriteFile(statePath, data, 0644)
+	if statePath == runtimeStatePath(t.InputPath) {
+		removeIfExists(historyStatePath(t.InputPath))
+	} else {
+		removeIfExists(runtimeStatePath(t.InputPath))
+	}
 }
 
 func unixOrZero(t time.Time) int64 {
@@ -193,6 +204,53 @@ func accumulateElapsed(t *TranslationTask, now time.Time) {
 	}
 }
 
+func ensureStateDirs() {
+	os.MkdirAll(runtimeStatesDir, os.ModePerm)
+	os.MkdirAll(historyStatesDir, os.ModePerm)
+}
+
+func stateFileName(inputPath string) string {
+	return filepath.Base(inputPath) + ".state.json"
+}
+
+func runtimeStatePath(inputPath string) string {
+	return filepath.Join(runtimeStatesDir, stateFileName(inputPath))
+}
+
+func historyStatePath(inputPath string) string {
+	return filepath.Join(historyStatesDir, stateFileName(inputPath))
+}
+
+func statePathForStatus(inputPath, status string) string {
+	if status == "running" || status == "queued" {
+		return runtimeStatePath(inputPath)
+	}
+	return historyStatePath(inputPath)
+}
+
+func removeIfExists(path string) {
+	if path == "" {
+		return
+	}
+	os.Remove(path)
+}
+
+func latestStateFile(dir, taskID string) string {
+	files, _ := filepath.Glob(filepath.Join(dir, taskID+"*.state.json"))
+	if len(files) == 0 {
+		return ""
+	}
+	sort.Slice(files, func(i, j int) bool {
+		infoI, errI := os.Stat(files[i])
+		infoJ, errJ := os.Stat(files[j])
+		if errI != nil || errJ != nil {
+			return files[i] < files[j]
+		}
+		return infoI.ModTime().After(infoJ.ModTime())
+	})
+	return files[0]
+}
+
 func safeSendTaskMessage(t *TranslationTask, msg webtask.LogMsg) {
 	defer func() {
 		recover()
@@ -213,6 +271,7 @@ var (
 func main() {
 	// Ensure temp dir exists for uploads
 	os.MkdirAll("temp_uploads", os.ModePerm)
+	ensureStateDirs()
 	instanceID = newInstanceID()
 	maxParallel = getMaxParallel()
 	if maxParallel < 1 {
@@ -511,11 +570,13 @@ func handleTaskStatus(w http.ResponseWriter, r *http.Request) {
 	mu.Unlock()
 
 	if !ok {
-		// Try to recover from disk
-		files, _ := filepath.Glob(filepath.Join("temp_uploads", taskID+"*.state.json"))
-		if len(files) > 0 {
+		statePath := latestStateFile(runtimeStatesDir, taskID)
+		if statePath == "" {
+			statePath = latestStateFile(historyStatesDir, taskID)
+		}
+		if statePath != "" {
 			var state TaskState
-			data, err := os.ReadFile(files[0])
+			data, err := os.ReadFile(statePath)
 			if err == nil && json.Unmarshal(data, &state) == nil {
 				normalizeState(&state)
 				status, resumeSupported, reason := resolveTaskState(state)
@@ -566,12 +627,15 @@ func handleResume(w http.ResponseWriter, r *http.Request) {
 
 	var state TaskState
 	if !ok {
-		files, _ := filepath.Glob(filepath.Join("temp_uploads", taskID+"*.state.json"))
-		if len(files) == 0 {
+		statePath := latestStateFile(runtimeStatesDir, taskID)
+		if statePath == "" {
+			statePath = latestStateFile(historyStatesDir, taskID)
+		}
+		if statePath == "" {
 			http.Error(w, "State not found", http.StatusNotFound)
 			return
 		}
-		data, err := os.ReadFile(files[0])
+		data, err := os.ReadFile(statePath)
 		if err != nil {
 			http.Error(w, "Failed to read state", http.StatusInternalServerError)
 			return
@@ -667,7 +731,7 @@ func handlePause(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleTasks(w http.ResponseWriter, r *http.Request) {
-	files, _ := filepath.Glob(filepath.Join("temp_uploads", "*.state.json"))
+	files, _ := filepath.Glob(filepath.Join(historyStatesDir, "*.state.json"))
 	type taskSummary struct {
 		ID              string                     `json:"id"`
 		Status          string                     `json:"status"`
@@ -775,13 +839,16 @@ func handleTaskGetByID(w http.ResponseWriter, r *http.Request, taskID string) {
 		})
 		return
 	}
-	files, _ := filepath.Glob(filepath.Join("temp_uploads", taskID+"*.state.json"))
-	if len(files) == 0 {
+	statePath := latestStateFile(runtimeStatesDir, taskID)
+	if statePath == "" {
+		statePath = latestStateFile(historyStatesDir, taskID)
+	}
+	if statePath == "" {
 		http.Error(w, "Task not found", http.StatusNotFound)
 		return
 	}
 	var state TaskState
-	data, err := os.ReadFile(files[0])
+	data, err := os.ReadFile(statePath)
 	if err != nil || json.Unmarshal(data, &state) != nil {
 		http.Error(w, "Failed to read state", http.StatusInternalServerError)
 		return
@@ -838,10 +905,13 @@ func handleTaskDeleteByID(w http.ResponseWriter, r *http.Request, taskID string)
 	}
 
 	if !ok {
-		files, _ := filepath.Glob(filepath.Join("temp_uploads", taskID+"*.state.json"))
-		if len(files) > 0 {
+		statePath := latestStateFile(runtimeStatesDir, taskID)
+		if statePath == "" {
+			statePath = latestStateFile(historyStatesDir, taskID)
+		}
+		if statePath != "" {
 			var state TaskState
-			data, err := os.ReadFile(files[0])
+			data, err := os.ReadFile(statePath)
 			if err == nil && json.Unmarshal(data, &state) == nil {
 				normalizeState(&state)
 				inputPath = state.InputPath
@@ -865,6 +935,8 @@ func deleteTaskFiles(taskID, inputPath, outPath string) {
 	if inputPath != "" {
 		paths[inputPath] = struct{}{}
 		paths[inputPath+".state.json"] = struct{}{}
+		paths[runtimeStatePath(inputPath)] = struct{}{}
+		paths[historyStatePath(inputPath)] = struct{}{}
 	}
 	if outPath != "" {
 		paths[outPath] = struct{}{}
@@ -872,6 +944,14 @@ func deleteTaskFiles(taskID, inputPath, outPath string) {
 	pattern := filepath.Join("temp_uploads", taskID+"*")
 	matches, _ := filepath.Glob(pattern)
 	for _, p := range matches {
+		paths[p] = struct{}{}
+	}
+	runtimeMatches, _ := filepath.Glob(filepath.Join(runtimeStatesDir, taskID+"*.state.json"))
+	for _, p := range runtimeMatches {
+		paths[p] = struct{}{}
+	}
+	historyMatches, _ := filepath.Glob(filepath.Join(historyStatesDir, taskID+"*.state.json"))
+	for _, p := range historyMatches {
 		paths[p] = struct{}{}
 	}
 	for p := range paths {

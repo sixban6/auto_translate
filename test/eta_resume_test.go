@@ -15,7 +15,9 @@ func TestETA_Calculation_WithZeroCurrent(t *testing.T) {
 
 	taskID := "task_eta_zero"
 	inputPath := filepath.Join(srv.WorkDir, "temp_uploads", taskID+".txt")
-	statePath := inputPath + ".state.json"
+	runtimeDir := filepath.Join(srv.WorkDir, "temp_uploads", "runtime_states")
+	os.MkdirAll(runtimeDir, 0755)
+	statePath := filepath.Join(runtimeDir, filepath.Base(inputPath)+".state.json")
 	os.WriteFile(inputPath, []byte("dummy"), 0644)
 	defer os.Remove(inputPath)
 	defer os.Remove(statePath)
@@ -34,23 +36,17 @@ func TestETA_Calculation_WithZeroCurrent(t *testing.T) {
 	data, _ := json.MarshalIndent(state, "", "  ")
 	os.WriteFile(statePath, data, 0644)
 
-	resp, err := http.Get(srv.BaseURL + "/api/tasks")
+	resp, err := http.Get(srv.BaseURL + "/api/task_status?task_id=" + taskID)
 	if err != nil {
-		t.Fatalf("tasks request failed: %v", err)
+		t.Fatalf("status request failed: %v", err)
 	}
 	defer resp.Body.Close()
-	var payload struct {
-		Tasks []map[string]interface{} `json:"tasks"`
-	}
+	var payload map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		t.Fatalf("decode failed: %v", err)
 	}
-	for _, task := range payload.Tasks {
-		if task["id"] == taskID {
-			if task["eta_sec"].(float64) != -1 {
-				t.Fatalf("expected eta_sec -1, got %v", task["eta_sec"])
-			}
-		}
+	if payload["eta_sec"].(float64) != -1 {
+		t.Fatalf("expected eta_sec -1, got %v", payload["eta_sec"])
 	}
 }
 
@@ -60,7 +56,9 @@ func TestETA_OnResume_SmoothDecay(t *testing.T) {
 
 	taskID := "task_eta_resume"
 	inputPath := filepath.Join(srv.WorkDir, "temp_uploads", taskID+".txt")
-	statePath := inputPath + ".state.json"
+	runtimeDir := filepath.Join(srv.WorkDir, "temp_uploads", "runtime_states")
+	os.MkdirAll(runtimeDir, 0755)
+	statePath := filepath.Join(runtimeDir, filepath.Base(inputPath)+".state.json")
 	os.WriteFile(inputPath, []byte("dummy"), 0644)
 	defer os.Remove(inputPath)
 	defer os.Remove(statePath)
@@ -79,23 +77,17 @@ func TestETA_OnResume_SmoothDecay(t *testing.T) {
 	data, _ := json.MarshalIndent(state, "", "  ")
 	os.WriteFile(statePath, data, 0644)
 
-	resp, err := http.Get(srv.BaseURL + "/api/tasks")
+	resp, err := http.Get(srv.BaseURL + "/api/task_status?task_id=" + taskID)
 	if err != nil {
-		t.Fatalf("tasks request failed: %v", err)
+		t.Fatalf("status request failed: %v", err)
 	}
 	defer resp.Body.Close()
-	var payload struct {
-		Tasks []map[string]interface{} `json:"tasks"`
-	}
+	var payload map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		t.Fatalf("decode failed: %v", err)
 	}
-	for _, task := range payload.Tasks {
-		if task["id"] == taskID {
-			eta := int(task["eta_sec"].(float64))
-			if eta < 60 {
-				t.Fatalf("expected eta_sec not too small, got %d", eta)
-			}
-		}
+	eta := int(payload["eta_sec"].(float64))
+	if eta < 60 {
+		t.Fatalf("expected eta_sec not too small, got %d", eta)
 	}
 }

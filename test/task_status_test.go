@@ -27,7 +27,9 @@ func TestTaskStatus_GhostProcessRejection(t *testing.T) {
 
 	taskID := "task_ghost"
 	inputPath := filepath.Join(srv.WorkDir, "temp_uploads", taskID+".epub")
-	statePath := inputPath + ".state.json"
+	runtimeDir := filepath.Join(srv.WorkDir, "temp_uploads", "runtime_states")
+	os.MkdirAll(runtimeDir, 0755)
+	statePath := filepath.Join(runtimeDir, filepath.Base(inputPath)+".state.json")
 	os.WriteFile(inputPath, []byte("dummy"), 0644)
 	defer os.Remove(inputPath)
 	defer os.Remove(statePath)
@@ -67,7 +69,9 @@ func TestTaskStatus_QueuedGhostRejection(t *testing.T) {
 
 	taskID := "task_queued_ghost"
 	inputPath := filepath.Join(srv.WorkDir, "temp_uploads", taskID+".epub")
-	statePath := inputPath + ".state.json"
+	runtimeDir := filepath.Join(srv.WorkDir, "temp_uploads", "runtime_states")
+	os.MkdirAll(runtimeDir, 0755)
+	statePath := filepath.Join(runtimeDir, filepath.Base(inputPath)+".state.json")
 	os.WriteFile(inputPath, []byte("dummy"), 0644)
 	defer os.Remove(inputPath)
 	defer os.Remove(statePath)

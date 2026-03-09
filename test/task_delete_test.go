@@ -19,10 +19,12 @@ func TestTaskDelete_RemovesAllArtifacts(t *testing.T) {
 	taskID := "task_delete_artifacts"
 	baseDir := filepath.Join(srv.WorkDir, "temp_uploads")
 	os.MkdirAll(baseDir, 0755)
+	historyDir := filepath.Join(baseDir, "history_states")
+	os.MkdirAll(historyDir, 0755)
 
 	input := filepath.Join(baseDir, taskID+".txt")
 	output := filepath.Join(baseDir, taskID+"_translated.txt")
-	statePath := input + ".state.json"
+	statePath := filepath.Join(historyDir, filepath.Base(input)+".state.json")
 
 	os.WriteFile(input, []byte("dummy"), 0644)
 	os.WriteFile(output, []byte("translated"), 0644)
@@ -103,11 +105,22 @@ func TestTaskDelete_CancelRunningTaskFirst(t *testing.T) {
 	delResp.Body.Close()
 
 	baseDir := filepath.Join(srv.WorkDir, "temp_uploads")
-	pattern := filepath.Join(baseDir, taskID+"*")
+	patterns := []string{
+		filepath.Join(baseDir, taskID+"*"),
+		filepath.Join(baseDir, "runtime_states", taskID+"*.state.json"),
+		filepath.Join(baseDir, "history_states", taskID+"*.state.json"),
+	}
 	deadline := time.Now().Add(8 * time.Second)
 	for time.Now().Before(deadline) {
-		matches, _ := filepath.Glob(pattern)
-		if len(matches) == 0 {
+		found := false
+		for _, pattern := range patterns {
+			matches, _ := filepath.Glob(pattern)
+			if len(matches) > 0 {
+				found = true
+				break
+			}
+		}
+		if !found {
 			return
 		}
 		time.Sleep(200 * time.Millisecond)

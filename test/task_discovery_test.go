@@ -20,11 +20,12 @@ func TestTaskDiscovery_ListAll(t *testing.T) {
 	defer srv.Close()
 
 	baseDir := filepath.Join(srv.WorkDir, "temp_uploads")
-	os.MkdirAll(baseDir, 0755)
+	historyDir := filepath.Join(baseDir, "history_states")
+	os.MkdirAll(historyDir, 0755)
 
 	createState := func(id, status string, modTime time.Time) string {
 		input := filepath.Join(baseDir, id+".txt")
-		statePath := input + ".state.json"
+		statePath := filepath.Join(historyDir, filepath.Base(input)+".state.json")
 		os.WriteFile(input, []byte("dummy"), 0644)
 		state := map[string]interface{}{
 			"id":                id,
@@ -44,7 +45,7 @@ func TestTaskDiscovery_ListAll(t *testing.T) {
 	state1 := createState("task_done", "completed", now.Add(-1*time.Minute))
 	state2 := createState("task_interrupted", "interrupted", now.Add(-2*time.Minute))
 	state3 := createState("task_queued", "queued", now.Add(-3*time.Minute))
-	dirtyPath := filepath.Join(baseDir, "dirty.state.json")
+	dirtyPath := filepath.Join(historyDir, "dirty.state.json")
 	os.WriteFile(dirtyPath, []byte("not-json"), 0644)
 
 	defer os.Remove(state1)

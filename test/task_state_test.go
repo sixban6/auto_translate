@@ -50,7 +50,9 @@ func TestTaskState_PersistSrcFileName(t *testing.T) {
 	taskID := res["task_id"]
 
 	baseDir := filepath.Join(srv.WorkDir, "temp_uploads")
-	statePath := filepath.Join(baseDir, taskID+".txt.state.json")
+	runtimeDir := filepath.Join(baseDir, "runtime_states")
+	os.MkdirAll(runtimeDir, 0755)
+	statePath := filepath.Join(runtimeDir, taskID+".txt.state.json")
 	deadline := time.Now().Add(8 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(statePath); err == nil {
@@ -78,7 +80,9 @@ func TestTaskState_ResumeKeepsElapsed(t *testing.T) {
 
 	taskID := "task_elapsed_resume"
 	inputPath := filepath.Join(srv.WorkDir, "temp_uploads", taskID+".txt")
-	statePath := inputPath + ".state.json"
+	historyDir := filepath.Join(srv.WorkDir, "temp_uploads", "history_states")
+	os.MkdirAll(historyDir, 0755)
+	statePath := filepath.Join(historyDir, filepath.Base(inputPath)+".state.json")
 	os.WriteFile(inputPath, []byte("dummy"), 0644)
 	defer os.Remove(inputPath)
 	defer os.Remove(statePath)

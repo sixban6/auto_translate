@@ -60,32 +60,29 @@ func TestTaskConcurrency_LimitEnforcement(t *testing.T) {
 
 	time.Sleep(200 * time.Millisecond)
 
-	resp, err := http.Get(srv.BaseURL + "/api/tasks")
-	if err != nil {
-		t.Fatalf("tasks request failed: %v", err)
+	getStatus := func(id string) string {
+		resp, err := http.Get(srv.BaseURL + "/api/task_status?task_id=" + id)
+		if err != nil {
+			t.Fatalf("status request failed: %v", err)
+		}
+		defer resp.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode failed: %v", err)
+		}
+		if s, ok := payload["status"].(string); ok {
+			return s
+		}
+		return ""
 	}
-	defer resp.Body.Close()
 
-	var payload struct {
-		Tasks []struct {
-			ID     string `json:"id"`
-			Status string `json:"status"`
-		} `json:"tasks"`
+	if getStatus(task1) != "running" {
+		t.Fatalf("expected task1 running")
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		t.Fatalf("decode failed: %v", err)
+	if getStatus(task2) != "queued" {
+		t.Fatalf("expected task2 queued")
 	}
-	statusMap := map[string]string{}
-	for _, tsk := range payload.Tasks {
-		statusMap[tsk.ID] = tsk.Status
-	}
-	if statusMap[task1] != "running" {
-		t.Fatalf("expected task1 running, got %s", statusMap[task1])
-	}
-	if statusMap[task2] != "queued" {
-		t.Fatalf("expected task2 queued, got %s", statusMap[task2])
-	}
-	if statusMap[task3] != "queued" {
-		t.Fatalf("expected task3 queued, got %s", statusMap[task3])
+	if getStatus(task3) != "queued" {
+		t.Fatalf("expected task3 queued")
 	}
 }
