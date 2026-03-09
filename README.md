@@ -28,6 +28,7 @@ bash start.sh
 <video src="https://github.com/sixban6/auto_translate/raw/main/auto-trans.mp4" controls="controls" style="max-width: 100%; display: block;">
   你的浏览器不支持 HTML5 视频。
 </video>
+
 停止程序
 ```bash
 chmod +x start.sh
