@@ -1,6 +1,7 @@
 package test
 
 import (
+	"context"
 	"testing"
 
 	"auto_translate/pkg/config"
@@ -24,7 +25,7 @@ func TestTranslationStats_Tracking(t *testing.T) {
 	// Since we haven't implemented mock server for this specific test, we'll just test the Short/Glossary logic which doesn't hit the server.
 
 	// 1. Fallback (Glossary)
-	res, status, err := tr.Translate("Term")
+	res, status, err := tr.Translate(context.Background(), "Term")
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -36,7 +37,7 @@ func TestTranslationStats_Tracking(t *testing.T) {
 	}
 
 	// 2. Fallback (Short Text)
-	res2, status2, err2 := tr.Translate("Abc")
+	res2, status2, err2 := tr.Translate(context.Background(), "Abc")
 	if err2 != nil {
 		t.Fatalf("Unexpected error: %v", err2)
 	}

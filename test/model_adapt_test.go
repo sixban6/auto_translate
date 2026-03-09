@@ -1,6 +1,7 @@
 package test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -92,7 +93,7 @@ func TestTranslator_ModelAdaptationPayload(t *testing.T) {
 			}
 			tr := translator.New(cfg)
 
-			got, status, err := tr.Translate("test content")
+			got, status, err := tr.Translate(context.Background(), "test content")
 			if err != nil {
 				t.Fatalf("Translate failed: %v", err)
 			}

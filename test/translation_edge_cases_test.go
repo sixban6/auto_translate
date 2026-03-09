@@ -1,6 +1,7 @@
 package test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -34,7 +35,7 @@ func TestTranslator_ShortTextFallback(t *testing.T) {
 	tr := translator.New(cfg)
 
 	// Sub-test 1: Short text exists in glossary
-	res, _, err := tr.Translate("Portadilla")
+	res, _, err := tr.Translate(context.Background(), "Portadilla")
 	if err != nil {
 		t.Fatalf("Expected no error, got %v", err)
 	}
@@ -43,7 +44,7 @@ func TestTranslator_ShortTextFallback(t *testing.T) {
 	}
 
 	// Sub-test 2: Extremely short text not in glossary (fallback to original text)
-	res2, _, err := tr.Translate("Xyz")
+	res2, _, err := tr.Translate(context.Background(), "Xyz")
 	if err != nil {
 		t.Fatalf("Expected no error, got %v", err)
 	}
@@ -77,7 +78,7 @@ func TestTranslator_ModelRefusalIntercept(t *testing.T) {
 	tr := translator.New(cfg)
 
 	originalText := "Weird isolated phrase"
-	res, _, err := tr.Translate(originalText)
+	res, _, err := tr.Translate(context.Background(), originalText)
 	if err == nil {
 		t.Fatalf("Expected error due to model refusal, but got nil")
 	}
@@ -134,7 +135,7 @@ func TestChunkAggregation_TxtShortTexts(t *testing.T) {
 		{ID: "txt_2", OriginalText: "This is a long sentence that should not be merged because it's long enough. It actually has some meat to it."},
 	}
 
-	translatedBlocks, _, err := proc.Process(blocks, nil, nil, nil)
+	translatedBlocks, _, err := proc.Process(context.Background(), blocks, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Process error: %v", err)
 	}
@@ -207,7 +208,7 @@ func TestChunkAggregation_EpubNoMerge(t *testing.T) {
 		{ID: "ch1.html_block_3", OriginalText: "Long enough body text for direct translation."},
 	}
 
-	translatedBlocks, _, err := proc.Process(blocks, nil, nil, nil)
+	translatedBlocks, _, err := proc.Process(context.Background(), blocks, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Process error: %v", err)
 	}
@@ -273,7 +274,7 @@ func TestSentenceSplit_LongText(t *testing.T) {
 		{ID: "txt_0", OriginalText: "This is sentence one. This is sentence two that should trigger a split."},
 	}
 
-	translatedBlocks, _, err := proc.Process(blocks, nil, nil, nil)
+	translatedBlocks, _, err := proc.Process(context.Background(), blocks, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Process error: %v", err)
 	}
@@ -332,7 +333,7 @@ func TestChunkAggregation_EpubBlockIsolation(t *testing.T) {
 		{ID: "ch1.html_block_3", OriginalText: "adventure book."},
 	}
 
-	translatedBlocks, _, err := proc.Process(blocks, nil, nil, nil)
+	translatedBlocks, _, err := proc.Process(context.Background(), blocks, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Process error: %v", err)
 	}

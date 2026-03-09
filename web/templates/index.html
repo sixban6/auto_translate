@@ -1,185 +1,361 @@
 <!doctype html>
 <html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Auto-Translator - 沉浸式本地翻译舱</title>
+    <link rel="stylesheet" href="/static/style.css" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+  </head>
 
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Auto-Translator - 沉浸式本地翻译舱</title>
-  <link rel="stylesheet" href="/static/style.css" />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
-</head>
-
-<body>
-  <div class="app-container">
-    <!-- Sidebar -->
-    <aside class="sidebar">
-      <div class="logo-area">
-        <svg class="logo-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M12 2L2 7L12 12L22 7L12 2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-            stroke-linejoin="round" />
-          <path d="M2 17L12 22L22 17" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-            stroke-linejoin="round" />
-          <path d="M2 12L12 17L22 12" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-            stroke-linejoin="round" />
-        </svg>
-        <div class="logo-text">Auto-Trans</div>
-      </div>
-
-      <form id="configForm" class="config-form">
-        <div class="form-section">
-          <div class="section-title">模型与接口</div>
-          <div class="form-group">
-            <label>本地模型 (Ollama)</label>
-            <select id="modelSelect" class="select-input">
-              <option value="translategemma:12b">加载中...</option>
-            </select>
-            <input type="text" name="model" id="modelInput" value="translategemma:12b" class="select-input"
-              style="display: none; margin-top: 8px" placeholder="请输入模型名称" required />
-          </div>
-          <div class="form-group">
-            <label>请求地址 (API URL)</label>
-            <input type="text" name="api_url" value="http://localhost:11434/v1/chat/completions" required />
-          </div>
+  <body>
+    <button class="btn-secondary history-btn-fixed" id="historyBtn">
+      <svg
+        width="16"
+        height="16"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        style="margin-right: 6px"
+      >
+        <circle cx="12" cy="12" r="10"></circle>
+        <polyline points="12 6 12 12 16 14"></polyline>
+      </svg>
+      历史任务
+    </button>
+    <div class="app-container">
+      <!-- Sidebar -->
+      <aside class="sidebar">
+        <div class="logo-area">
+          <svg
+            class="logo-icon"
+            viewBox="0 0 24 24"
+            fill="none"
+            xmlns="http://www.w3.org/2000/svg"
+          >
+            <path
+              d="M12 2L2 7L12 12L22 7L12 2Z"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+            <path
+              d="M2 17L12 22L22 17"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+            <path
+              d="M2 12L12 17L22 12"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+          <div class="logo-text">Auto-Trans</div>
         </div>
 
-        <div class="form-section">
-          <div class="section-title">翻译参数</div>
-          <div class="form-group">
-            <label>翻译专家角色</label>
-            <select id="roleSelect" name="prompt_role" class="select-input">
-              <option value="金融翻译专家">加载中...</option>
-            </select>
-            <div id="rolePreview" class="mt-2 text-xs text-gray"
-              style="max-height: 120px; overflow-y: auto; padding: 8px; background: var(--bg-secondary); border-radius: 4px; display: none;">
+        <form id="configForm" class="config-form">
+          <div class="form-section">
+            <div class="section-title">模型与接口</div>
+            <div class="form-group">
+              <label>本地模型 (Ollama)</label>
+              <select id="modelSelect" class="select-input">
+                <option value="translategemma:12b">加载中...</option>
+              </select>
+              <input
+                type="text"
+                name="model"
+                id="modelInput"
+                value="translategemma:12b"
+                class="select-input"
+                style="display: none; margin-top: 8px"
+                placeholder="请输入模型名称"
+                required
+              />
+            </div>
+            <div class="form-group">
+              <label>请求地址 (API URL)</label>
+              <input
+                type="text"
+                name="api_url"
+                value="http://localhost:11434/v1/chat/completions"
+                required
+              />
             </div>
           </div>
-          <div class="form-group">
-            <label>重试超时(秒)</label>
-            <input type="number" name="request_timeout_sec" value="180" min="5" />
-          </div>
-          <div class="form-group">
-            <label>重试次数</label>
-            <input type="number" name="max_retries" value="5" min="1" max="20" />
-          </div>
-        </div>
 
-        <div class="form-section">
-          <div class="section-title">术语与输出</div>
-          <div class="form-group">
-            <label>术语表 (Glossary: 英文=中文)</label>
-            <textarea name="glossary_text" rows="5" placeholder="例如:\nDemand=需求\nSupply=供应">
+          <div class="form-section">
+            <div class="section-title">翻译参数</div>
+            <div class="form-group">
+              <label>翻译专家角色</label>
+              <select id="roleSelect" name="prompt_role" class="select-input">
+                <option value="金融翻译专家">加载中...</option>
+              </select>
+              <div
+                id="rolePreview"
+                class="mt-2 text-xs text-gray"
+                style="
+                  max-height: 120px;
+                  overflow-y: auto;
+                  padding: 8px;
+                  background: var(--bg-secondary);
+                  border-radius: 4px;
+                  display: none;
+                "
+              ></div>
+            </div>
+            <div class="form-group">
+              <label>重试超时(秒)</label>
+              <input
+                type="number"
+                name="request_timeout_sec"
+                value="180"
+                min="5"
+              />
+            </div>
+            <div class="form-group">
+              <label>重试次数</label>
+              <input
+                type="number"
+                name="max_retries"
+                value="5"
+                min="1"
+                max="20"
+              />
+            </div>
+          </div>
+
+          <div class="form-section">
+            <div class="section-title">术语与输出</div>
+            <div class="form-group">
+              <label>术语表 (Glossary: 英文=中文)</label>
+              <textarea
+                name="glossary_text"
+                rows="5"
+                placeholder="例如:\nDemand=需求\nSupply=供应"
+              >
 Ventas=抛压
 Selling=抛压
 Compras=买盘
 Buying=买盘
 El camino de menor resistencia=阻力最小路径
 Supply=供应
-Demand=需求</textarea>
+Demand=需求</textarea
+              >
+            </div>
+            <div class="form-group toggle-group">
+              <label>双语对照模式</label>
+              <label class="switch">
+                <input type="checkbox" name="bilingual" checked />
+                <span class="slider round"></span>
+              </label>
+            </div>
+            <div class="form-group toggle-group">
+              <label>完成提示音</label>
+              <label class="switch">
+                <input type="checkbox" name="completion_chime" checked />
+                <span class="slider round"></span>
+              </label>
+            </div>
           </div>
-          <div class="form-group toggle-group">
-            <label>双语对照模式</label>
-            <label class="switch">
-              <input type="checkbox" name="bilingual" checked />
-              <span class="slider round"></span>
-            </label>
+        </form>
+      </aside>
+
+      <!-- Main Content -->
+      <main class="main-content">
+        <header class="top-bar">
+          <h1>沉浸式本地翻译引擎</h1>
+          <p>完全零成本，基于你本地的显卡算力翻译数十万字的小说或专业文献。</p>
+        </header>
+
+        <div class="workspace">
+          <div class="upload-zone" id="uploadZone">
+            <div class="upload-icon">
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+              >
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="17 8 12 3 7 8"></polyline>
+                <line x1="12" y1="3" x2="12" y2="15"></line>
+              </svg>
+            </div>
+            <h2>上传你需要翻译的文件</h2>
+            <p>
+              支持 <strong>.epub</strong> 格式（保持原定排版注入双语）或
+              <strong>.txt</strong> 格式。
+            </p>
+            <button
+              class="btn-primary mt-4"
+              onclick="document.getElementById('fileInput').click()"
+            >
+              选择文件
+            </button>
+            <input type="file" id="fileInput" hidden accept=".epub,.txt" />
+            <div id="selectedFileName" class="mt-2 text-sm text-gray"></div>
           </div>
-          <div class="form-group toggle-group">
-            <label>完成提示音</label>
-            <label class="switch">
-              <input type="checkbox" name="completion_chime" checked />
-              <span class="slider round"></span>
-            </label>
+
+          <!-- Progress Dashboard (Hidden initially) -->
+          <div class="dashboard hidden" id="dashboard">
+            <div class="status-card">
+              <div class="flex-between">
+                <h3 id="taskTitle">正在翻译: book.epub</h3>
+                <span class="badge" id="statusBadge">进行中</span>
+              </div>
+
+              <div class="progress-wrapper">
+                <div class="progress-bar">
+                  <div
+                    class="progress-fill"
+                    id="progressFill"
+                    style="width: 0%"
+                  ></div>
+                </div>
+                <div class="flex-between progress-stats">
+                  <span id="progressPercent">0%</span>
+                  <span id="progressText">0 / 0 块</span>
+                </div>
+                <div class="progress-time-stats">
+                  <span id="elapsedText">已用时 00:00:00</span>
+                  <span id="etaText">预计剩余 计算中...</span>
+                </div>
+              </div>
+
+              <div class="terminal-log" id="terminalLog">
+                <!-- Logs injected here -->
+                <div class="log-line text-green">> 翻译引擎已就绪...</div>
+              </div>
+
+              <div
+                id="configExplanation"
+                class="text-sm text-gray mt-4 p-3 hidden"
+                style="
+                  background: var(--bg-secondary);
+                  border-radius: 6px;
+                  white-space: pre-wrap;
+                "
+              ></div>
+
+              <div
+                id="statsDashboard"
+                class="mt-4 hidden"
+                style="
+                  background: var(--bg-secondary);
+                  padding: 12px;
+                  border-radius: 6px;
+                  display: flex;
+                  justify-content: space-between;
+                "
+              >
+                <span class="text-green" id="statSuccess">成功: 0</span>
+                <span style="color: var(--accent)" id="statFallback"
+                  >降级: 0</span
+                >
+                <span class="text-red" id="statRefused">拒答: 0</span>
+                <span class="text-red" id="statFailed">失败: 0</span>
+              </div>
+
+              <div class="actions mt-4 flex justify-end">
+                <button
+                  class="btn-secondary hidden"
+                  id="downloadFailuresBtn"
+                  style="
+                    color: var(--text-red);
+                    border-color: var(--text-red);
+                    margin-right: 8px;
+                  "
+                >
+                  下载失败记录
+                </button>
+                <button
+                  class="btn-secondary hidden"
+                  id="pauseBtn"
+                  style="margin-right: 8px"
+                >
+                  暂停任务
+                </button>
+                <button
+                  class="btn-secondary hidden"
+                  id="downloadBtn"
+                  style="margin-right: 8px"
+                >
+                  下载译本
+                </button>
+                <button class="btn-primary" id="startBtn">开始执行翻译</button>
+              </div>
+            </div>
+          </div>
+          <div class="modal-overlay hidden" id="historyModal">
+            <div class="modal-content">
+              <div class="modal-header">
+                <h2>历史任务列表</h2>
+                <div class="modal-actions">
+                  <button class="btn-icon" id="refreshHistoryBtn" title="刷新">
+                    <svg
+                      width="18"
+                      height="18"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                    >
+                      <path d="M23 4v6h-6"></path>
+                      <path d="M1 20v-6h6"></path>
+                      <path
+                        d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"
+                      ></path>
+                    </svg>
+                  </button>
+                  <button class="btn-icon" id="closeHistoryBtn" title="关闭">
+                    <svg
+                      width="18"
+                      height="18"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                    >
+                      <line x1="18" y1="6" x2="6" y2="18"></line>
+                      <line x1="6" y1="6" x2="18" y2="18"></line>
+                    </svg>
+                  </button>
+                </div>
+              </div>
+              <div class="modal-body">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th style="width: 35%">文件名 / 任务ID</th>
+                      <th style="width: 15%">状态</th>
+                      <th style="width: 20%">进度</th>
+                      <th style="width: 30%">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="historyTableBody"></tbody>
+                </table>
+                <div id="historyEmptyState" class="empty-state hidden">
+                  暂无历史任务
+                </div>
+              </div>
+            </div>
           </div>
         </div>
-      </form>
-    </aside>
+      </main>
+    </div>
 
-    <!-- Main Content -->
-    <main class="main-content">
-      <header class="top-bar">
-        <h1>沉浸式本地翻译引擎</h1>
-        <p>完全零成本，基于你本地的显卡算力翻译数十万字的小说或专业文献。</p>
-      </header>
+    <!-- Modals & Overlays -->
+    <div class="toast-container" id="toastContainer"></div>
 
-      <div class="workspace">
-        <div class="upload-zone" id="uploadZone">
-          <div class="upload-icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-              <polyline points="17 8 12 3 7 8"></polyline>
-              <line x1="12" y1="3" x2="12" y2="15"></line>
-            </svg>
-          </div>
-          <h2>上传你需要翻译的文件</h2>
-          <p>
-            支持 <strong>.epub</strong> 格式（保持原定排版注入双语）或
-            <strong>.txt</strong> 格式。
-          </p>
-          <button class="btn-primary mt-4" onclick="document.getElementById('fileInput').click()">
-            选择文件
-          </button>
-          <input type="file" id="fileInput" hidden accept=".epub,.txt" />
-          <div id="selectedFileName" class="mt-2 text-sm text-gray"></div>
-        </div>
-
-        <!-- Progress Dashboard (Hidden initially) -->
-        <div class="dashboard hidden" id="dashboard">
-          <div class="status-card">
-            <div class="flex-between">
-              <h3 id="taskTitle">正在翻译: book.epub</h3>
-              <span class="badge" id="statusBadge">进行中</span>
-            </div>
-
-            <div class="progress-wrapper">
-              <div class="progress-bar">
-                <div class="progress-fill" id="progressFill" style="width: 0%"></div>
-              </div>
-              <div class="flex-between progress-stats">
-                <span id="progressPercent">0%</span>
-                <span id="progressText">0 / 0 块</span>
-              </div>
-              <div class="progress-time-stats">
-                <span id="elapsedText">已用时 00:00:00</span>
-                <span id="etaText">预计剩余 计算中...</span>
-              </div>
-            </div>
-
-            <div class="terminal-log" id="terminalLog">
-              <!-- Logs injected here -->
-              <div class="log-line text-green">> 翻译引擎已就绪...</div>
-            </div>
-
-            <div id="configExplanation" class="text-sm text-gray mt-4 p-3 hidden"
-              style="background: var(--bg-secondary); border-radius: 6px; white-space: pre-wrap;"></div>
-
-            <div id="statsDashboard" class="mt-4 hidden"
-              style="background: var(--bg-secondary); padding: 12px; border-radius: 6px; display: flex; justify-content: space-between;">
-              <span class="text-green" id="statSuccess">成功: 0</span>
-              <span style="color: var(--accent)" id="statFallback">降级: 0</span>
-              <span class="text-red" id="statRefused">拒答: 0</span>
-              <span class="text-red" id="statFailed">失败: 0</span>
-            </div>
-
-            <div class="actions mt-4 flex justify-end">
-              <button class="btn-secondary hidden" id="downloadFailuresBtn"
-                style="color: var(--text-red); border-color: var(--text-red); margin-right: 8px;">
-                下载失败记录
-              </button>
-              <button class="btn-secondary hidden" id="downloadBtn" style="margin-right: 8px;">
-                下载译本
-              </button>
-              <button class="btn-primary" id="startBtn">开始执行翻译</button>
-            </div>
-          </div>
-        </div>
-      </div>
-    </main>
-  </div>
-
-  <!-- Modals & Overlays -->
-  <div class="toast-container" id="toastContainer"></div>
-
-  <script src="/static/app.js"></script>
-</body>
-
+    <script src="/static/app.js"></script>
+  </body>
 </html>

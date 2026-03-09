@@ -2,6 +2,7 @@ package translator
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -46,7 +47,7 @@ func New(cfg *config.Config) *Translator {
 
 // Translate attempts to translate a given text snippet via the API.
 // Implements retries and handles glossary mapping.
-func (t *Translator) Translate(text string, onEvent ...func(string)) (string, TranslationStatus, error) {
+func (t *Translator) Translate(ctx context.Context, text string, onEvent ...func(string)) (string, TranslationStatus, error) {
 	if strings.TrimSpace(text) == "" {
 		return "", StatusSkip, nil // skip empty chunks
 	}
@@ -113,7 +114,10 @@ func (t *Translator) Translate(text string, onEvent ...func(string)) (string, Tr
 	}
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		req, err := http.NewRequest("POST", requestURL, bytes.NewBuffer(jsonData))
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		req, err := http.NewRequestWithContext(ctx, "POST", requestURL, bytes.NewBuffer(jsonData))
 		if err != nil {
 			return "", StatusFailed, fmt.Errorf("failed to create request: %w", err)
 		}

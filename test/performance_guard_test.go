@@ -1,6 +1,7 @@
 package test
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -60,7 +61,7 @@ func TestTranslator_BypassNonTranslatableText(t *testing.T) {
 	tr := translator.New(cfg)
 
 	input := "https://example.com/assets/cover.png"
-	got, status, err := tr.Translate(input)
+	got, status, err := tr.Translate(context.Background(), input)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -1,6 +1,7 @@
 package test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -80,7 +81,7 @@ func TestTranslator(t *testing.T) {
 	tr := translator.New(cfg)
 
 	// Test 1: Empty text
-	res, _, err := tr.Translate("   ")
+	res, _, err := tr.Translate(context.Background(), "   ")
 	if err != nil {
 		t.Fatalf("Translate error: %v", err)
 	}
@@ -90,7 +91,7 @@ func TestTranslator(t *testing.T) {
 
 	// Test 2: Standard text, verify retry (requestCount should be 2 now) and cleanup
 	eventCalled := false
-	res, _, err = tr.Translate("Just some text", func(msg string) {
+	res, _, err = tr.Translate(context.Background(), "Just some text", func(msg string) {
 		eventCalled = true
 		if !strings.Contains(msg, "Retrying") {
 			t.Errorf("Expected retry message, got %s", msg)
@@ -110,7 +111,7 @@ func TestTranslator(t *testing.T) {
 	}
 
 	// Test 3: Glossary check
-	res, _, err = tr.Translate("Test Demand")
+	res, _, err = tr.Translate(context.Background(), "Test Demand")
 	if err != nil {
 		t.Fatalf("Translate error: %v", err)
 	}
@@ -125,7 +126,7 @@ func TestTranslator(t *testing.T) {
 		t.Errorf("Cleanup failed, got %q", res)
 	}
 
-	res, _, err = tr.Translate("Hyphenated Token")
+	res, _, err = tr.Translate(context.Background(), "Hyphenated Token")
 	if err != nil {
 		t.Fatalf("Translate error: %v", err)
 	}
@@ -133,7 +134,7 @@ func TestTranslator(t *testing.T) {
 		t.Errorf("Hyphen cleanup failed, got %q", res)
 	}
 
-	res, _, err = tr.Translate("re")
+	res, _, err = tr.Translate(context.Background(), "re")
 	if err != nil {
 		t.Fatalf("Translate error: %v", err)
 	}

@@ -1,7 +1,11 @@
 package main
 
 import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -12,6 +16,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -37,6 +42,12 @@ type TranslationTask struct {
 	Stats           processor.TranslationStats
 	StartedAt       time.Time
 	CompletedChunks map[string]string
+	InstanceID      string
+	LastHeartbeat   time.Time
+	StatusReason    string
+	OriginalFilename string
+	Ctx             context.Context
+	Cancel          context.CancelFunc
 	StateMu         sync.Mutex
 }
 
@@ -50,12 +61,20 @@ type TaskState struct {
 	Config          *config.Config             `json:"config"`
 	CompletedChunks map[string]string          `json:"completed_chunks"`
 	Stats           processor.TranslationStats `json:"stats"`
+	InstanceID      string                     `json:"instance_id"`
+	LastHeartbeatTs int64                      `json:"last_heartbeat_ts"`
+	StatusReason    string                     `json:"status_reason"`
+	OriginalFilename string                    `json:"original_filename"`
 }
 
 func saveTaskState(t *TranslationTask) {
 	t.StateMu.Lock()
 	defer t.StateMu.Unlock()
 
+	lastHeartbeat := t.LastHeartbeat
+	if lastHeartbeat.IsZero() {
+		lastHeartbeat = time.Now()
+	}
 	state := TaskState{
 		ID:              t.ID,
 		Total:           t.Total,
@@ -66,6 +85,10 @@ func saveTaskState(t *TranslationTask) {
 		Config:          t.Config,
 		CompletedChunks: t.CompletedChunks,
 		Stats:           t.Stats,
+		InstanceID:      t.InstanceID,
+		LastHeartbeatTs: lastHeartbeat.Unix(),
+		StatusReason:    t.StatusReason,
+		OriginalFilename: t.OriginalFilename,
 	}
 
 	statePath := t.InputPath + ".state.json"
@@ -73,14 +96,35 @@ func saveTaskState(t *TranslationTask) {
 	os.WriteFile(statePath, data, 0644)
 }
 
+func safeSendTaskMessage(t *TranslationTask, msg webtask.LogMsg) {
+	defer func() {
+		recover()
+	}()
+	if t.MessageCh != nil {
+		t.MessageCh <- msg
+	}
+}
+
 var (
-	tasks = make(map[string]*TranslationTask)
-	mu    sync.Mutex
+	tasks       = make(map[string]*TranslationTask)
+	mu          sync.Mutex
+	taskQueue   chan *TranslationTask
+	instanceID  string
+	maxParallel int
 )
 
 func main() {
 	// Ensure temp dir exists for uploads
 	os.MkdirAll("temp_uploads", os.ModePerm)
+	instanceID = newInstanceID()
+	maxParallel = getMaxParallel()
+	if maxParallel < 1 {
+		maxParallel = 1
+	}
+	taskQueue = make(chan *TranslationTask, 200)
+	for i := 0; i < maxParallel; i++ {
+		go taskWorker()
+	}
 
 	// Serve Static Files
 	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("web/static"))))
@@ -115,6 +159,10 @@ func main() {
 	http.HandleFunc("/api/task_status", handleTaskStatus)
 	// API Endpoint: Resume Task
 	http.HandleFunc("/api/resume", handleResume)
+	// API Endpoint: List Tasks
+	http.HandleFunc("/api/tasks", handleTasks)
+	// API Endpoint: Pause Task
+	http.HandleFunc("/api/pause", handlePause)
 
 	port := getAvailablePort(4000)
 	fmt.Printf("Web server is running beautifully at http://localhost:%d\n", port)
@@ -224,20 +272,33 @@ func handleTranslateStart(w http.ResponseWriter, r *http.Request) {
 	// Create Task Tracker
 	task := &TranslationTask{
 		ID:              taskID,
-		Status:          "running",
+		Status:          "queued",
 		Config:          &cfg,
 		InputPath:       inputPath,
 		OutPath:         outPath,
 		MessageCh:       make(chan webtask.LogMsg, 100),
 		CompletedChunks: make(map[string]string),
+		InstanceID:      instanceID,
+		OriginalFilename: header.Filename,
 	}
+	task.LastHeartbeat = time.Now()
+	task.StatusReason = "queued"
 
 	mu.Lock()
 	tasks[taskID] = task
 	mu.Unlock()
 
-	// Dispatch background translation routine
-	go runTranslationTask(task)
+	saveTaskState(task)
+	task.MessageCh <- webtask.LogMsg{
+		Type:       "gray",
+		Message:    "任务已进入队列，等待可用执行槽位...",
+		Status:     "queued",
+		Total:      0,
+		Current:    0,
+		ElapsedSec: 0,
+		EtaSec:     -1,
+	}
+	taskQueue <- task
 
 	// Return initial response
 	w.Header().Set("Content-Type", "application/json")
@@ -357,14 +418,13 @@ func handleTaskStatus(w http.ResponseWriter, r *http.Request) {
 			var state TaskState
 			data, err := os.ReadFile(files[0])
 			if err == nil && json.Unmarshal(data, &state) == nil {
-				if state.Status == "running" {
-					state.Status = "disconnected"
-				}
+				status, resumeSupported, reason := resolveTaskState(state)
 				w.Header().Set("Content-Type", "application/json")
 				json.NewEncoder(w).Encode(map[string]interface{}{
-					"status":           state.Status,
+					"status":           status,
 					"stats":            state.Stats,
-					"resume_supported": true,
+					"resume_supported": resumeSupported,
+					"status_reason":    reason,
 				})
 				return
 			}
@@ -373,15 +433,14 @@ func handleTaskStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	statePath := task.InputPath + ".state.json"
-	_, err := os.Stat(statePath)
-	resumeSupported := err == nil && (task.Status == "error" || task.Status == "disconnected")
+	resumeSupported := task.Status == "error" || task.Status == "disconnected" || task.Status == "interrupted" || task.Status == "paused"
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":           task.Status,
 		"stats":            task.Stats,
 		"resume_supported": resumeSupported,
+		"status_reason":    task.StatusReason,
 	})
 }
 
@@ -411,10 +470,12 @@ func handleResume(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Failed to parse state", http.StatusInternalServerError)
 			return
 		}
+		status, _, _ := resolveTaskState(state)
+		state.Status = status
 
 		t = &TranslationTask{
 			ID:              state.ID,
-			Status:          "disconnected",
+			Status:          state.Status,
 			Total:           state.Total,
 			Current:         state.Current,
 			Config:          state.Config,
@@ -422,7 +483,10 @@ func handleResume(w http.ResponseWriter, r *http.Request) {
 			OutPath:         state.OutPath,
 			CompletedChunks: state.CompletedChunks,
 			Stats:           state.Stats,
+			InstanceID:      instanceID,
+			StatusReason:    state.StatusReason,
 		}
+		t.LastHeartbeat = time.Unix(state.LastHeartbeatTs, 0)
 
 		mu.Lock()
 		tasks[taskID] = t
@@ -434,14 +498,114 @@ func handleResume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	t.Status = "running"
+	t.Status = "queued"
+	t.StatusReason = "resume_queued"
 	t.Error = ""
 	t.MessageCh = make(chan webtask.LogMsg, 100)
+	t.InstanceID = instanceID
+	t.LastHeartbeat = time.Now()
+	saveTaskState(t)
 
-	go runTranslationTask(t)
+	taskQueue <- t
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"task_id": t.ID, "status": "resumed"})
+}
+
+func handlePause(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	taskID := r.URL.Query().Get("task_id")
+	mu.Lock()
+	t, ok := tasks[taskID]
+	mu.Unlock()
+	if !ok {
+		http.Error(w, "Task not found", http.StatusNotFound)
+		return
+	}
+	if t.Status != "running" && t.Status != "queued" {
+		http.Error(w, "Task not running or queued", http.StatusConflict)
+		return
+	}
+	if t.Cancel != nil {
+		t.Cancel()
+	}
+	t.Status = "paused"
+	t.StatusReason = "paused_by_user"
+	saveTaskState(t)
+	safeSendTaskMessage(t, webtask.LogMsg{
+		Type:    "orange",
+		Message: "任务已暂停",
+		Status:  "paused",
+		Total:   t.Total,
+		Current: t.Current,
+	})
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"task_id": t.ID, "status": "paused"})
+}
+
+func handleTasks(w http.ResponseWriter, r *http.Request) {
+	files, _ := filepath.Glob(filepath.Join("temp_uploads", "*.state.json"))
+	type taskSummary struct {
+		ID              string                     `json:"id"`
+		Status          string                     `json:"status"`
+		Total           int                        `json:"total"`
+		Current         int                        `json:"current"`
+		InputPath       string                     `json:"input_path"`
+		OutPath         string                     `json:"out_path"`
+		UpdatedAt       int64                      `json:"updated_at"`
+		ResumeSupported bool                       `json:"resume_supported"`
+		StatusReason    string                     `json:"status_reason"`
+		Stats           processor.TranslationStats `json:"stats"`
+		OriginalFilename string                    `json:"original_filename"`
+	}
+	type fileInfo struct {
+		path string
+		mod  time.Time
+	}
+	var infos []fileInfo
+	for _, f := range files {
+		stat, err := os.Stat(f)
+		if err != nil {
+			continue
+		}
+		infos = append(infos, fileInfo{path: f, mod: stat.ModTime()})
+	}
+	sort.Slice(infos, func(i, j int) bool { return infos[i].mod.After(infos[j].mod) })
+	if len(infos) > 50 {
+		infos = infos[:50]
+	}
+	summaries := make([]taskSummary, 0, len(infos))
+	for _, info := range infos {
+		var state TaskState
+		data, err := os.ReadFile(info.path)
+		if err != nil {
+			continue
+		}
+		if json.Unmarshal(data, &state) != nil {
+			continue
+		}
+		status, resumeSupported, reason := resolveTaskState(state)
+		summaries = append(summaries, taskSummary{
+			ID:              state.ID,
+			Status:          status,
+			Total:           state.Total,
+			Current:         state.Current,
+			InputPath:       state.InputPath,
+			OutPath:         state.OutPath,
+			UpdatedAt:       info.mod.Unix(),
+			ResumeSupported: resumeSupported,
+			StatusReason:    reason,
+			Stats:           state.Stats,
+			OriginalFilename: state.OriginalFilename,
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"tasks": summaries,
+	})
 }
 
 func handleModels(w http.ResponseWriter, r *http.Request) {
@@ -566,7 +730,33 @@ func runTranslationTask(t *TranslationTask) {
 	defer close(t.MessageCh)
 	startTime := time.Now()
 	t.StartedAt = startTime
+	t.Status = "running"
+	t.StatusReason = ""
+	t.InstanceID = instanceID
+	t.LastHeartbeat = time.Now()
+	if t.Cancel != nil {
+		t.Cancel()
+	}
+	t.Ctx, t.Cancel = context.WithCancel(context.Background())
 	etaEstimator := webtask.NewETAEstimator(0.25, 5)
+	heartbeatStop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		flush := time.NewTicker(1 * time.Minute)
+		defer ticker.Stop()
+		defer flush.Stop()
+		for {
+			select {
+			case <-heartbeatStop:
+				return
+			case <-ticker.C:
+				t.LastHeartbeat = time.Now()
+			case <-flush.C:
+				saveTaskState(t)
+			}
+		}
+	}()
+	defer close(heartbeatStop)
 
 	sendLog := func(msg, mType string) {
 		elapsedSec := 0
@@ -586,6 +776,7 @@ func runTranslationTask(t *TranslationTask) {
 
 	fail := func(err error) {
 		t.Status = "error"
+		t.StatusReason = "fatal_error"
 		t.Error = err.Error()
 		t.MessageCh <- webtask.LogMsg{
 			Type:       "red",
@@ -631,7 +822,7 @@ func runTranslationTask(t *TranslationTask) {
 	sendLog(fmt.Sprintf("引擎已并发启动 (Concurrency = %d). 请耐心等待...", t.Config.Concurrency), "gray")
 	saveTaskState(t)
 
-	translatedBlocks, stats, err := proc.Process(blocks, t.CompletedChunks, func(current, total int, msg string) {
+	translatedBlocks, stats, err := proc.Process(t.Ctx, blocks, t.CompletedChunks, func(current, total int, msg string) {
 		t.Total = total
 		if current >= 0 {
 			t.Current = current
@@ -665,6 +856,19 @@ func runTranslationTask(t *TranslationTask) {
 		saveTaskState(t)
 	})
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			t.Status = "paused"
+			t.StatusReason = "paused_by_user"
+			saveTaskState(t)
+			safeSendTaskMessage(t, webtask.LogMsg{
+				Type:       "orange",
+				Message:    "任务已暂停",
+				Status:     "paused",
+				ElapsedSec: int(time.Since(startTime).Seconds()),
+				EtaSec:     -1,
+			})
+			return
+		}
 		fail(err)
 		return
 	}
@@ -680,6 +884,7 @@ func runTranslationTask(t *TranslationTask) {
 
 	t.Stats = stats
 	t.Status = "completed"
+	t.StatusReason = ""
 	sendLog(fmt.Sprintf("📊 翻译统计: 成功=%d 术语降级=%d 拒答=%d 完全失败=%d", stats.SuccessCount, stats.FallbackCount, stats.RefusedCount, stats.FailureCount), "gray")
 	sendLog("🎉 生成最终电子书/文档成功！", "green")
 	elapsed := time.Since(startTime)
@@ -707,4 +912,69 @@ func formatDuration(d time.Duration) string {
 	hours := mins / 60
 	mins = mins % 60
 	return fmt.Sprintf("%dh%dm%ds", hours, mins, secs)
+}
+
+func resolveTaskState(state TaskState) (string, bool, string) {
+	status := state.Status
+	reason := state.StatusReason
+	now := time.Now()
+	if status == "running" || status == "queued" {
+		if state.InstanceID != "" && state.InstanceID != instanceID {
+			status = "interrupted"
+			reason = "instance_mismatch"
+		} else {
+			if state.LastHeartbeatTs == 0 {
+				status = "interrupted"
+				reason = "heartbeat_missing"
+			} else if now.Sub(time.Unix(state.LastHeartbeatTs, 0)) > 3*time.Minute {
+				status = "interrupted"
+				reason = "heartbeat_timeout"
+			}
+		}
+	}
+
+	// Fix: If task is interrupted but actually finished (100% and output file exists), mark as completed
+	if status == "interrupted" {
+		if state.Total > 0 && state.Current >= state.Total {
+			if _, err := os.Stat(state.OutPath); err == nil {
+				status = "completed"
+				reason = "recovered_completion"
+			}
+		}
+	}
+
+	if status == "error" && reason == "" {
+		reason = "error"
+	}
+	resumeSupported := status == "error" || status == "disconnected" || status == "interrupted" || status == "paused"
+	return status, resumeSupported, reason
+}
+
+func taskWorker() {
+	for task := range taskQueue {
+		if task.Status == "paused" {
+			continue
+		}
+		runTranslationTask(task)
+	}
+}
+
+func newInstanceID() string {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return fmt.Sprintf("instance-%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(buf)
+}
+
+func getMaxParallel() int {
+	val := strings.TrimSpace(os.Getenv("TRANSLATE_MAX_PARALLEL"))
+	if val == "" {
+		return 1
+	}
+	num, err := strconv.Atoi(val)
+	if err != nil {
+		return 1
+	}
+	return num
 }

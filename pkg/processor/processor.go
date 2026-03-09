@@ -1,6 +1,7 @@
 package processor
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -164,8 +165,11 @@ func shouldMergeEpubPhrasePiece(current, next string) bool {
 }
 
 // Process handles chunking, concurrent translation, and reassembly.
-func (p *Processor) Process(blocks []parser.TextBlock, stateMap map[string]string, onProgress func(int, int, string), onChunkCompleted func(string, string)) ([]parser.TranslatedBlock, TranslationStats, error) {
+func (p *Processor) Process(ctx context.Context, blocks []parser.TextBlock, stateMap map[string]string, onProgress func(int, int, string), onChunkCompleted func(string, string)) ([]parser.TranslatedBlock, TranslationStats, error) {
 	var stats TranslationStats
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	// 0. Pre-processing (Context Aggregation for short texts)
 	var mergedBlocks []parser.TextBlock
@@ -237,7 +241,13 @@ func (p *Processor) Process(blocks []parser.TextBlock, stateMap map[string]strin
 		go func() {
 			defer wg.Done()
 			for j := range jobs {
-				translated, status, err := p.translator.Translate(subChunks[j].Text, func(msg string) {
+				if ctx.Err() != nil {
+					subChunks[j].Err = ctx.Err()
+					subChunks[j].Status = translator.StatusFailed
+					results <- j
+					continue
+				}
+				translated, status, err := p.translator.Translate(ctx, subChunks[j].Text, func(msg string) {
 					if onProgress != nil {
 						onProgress(-1, totalJobs, fmt.Sprintf("[块 %s-%d] %s", subChunks[j].BlockID, subChunks[j].SubIndex, msg))
 					}
@@ -252,6 +262,9 @@ func (p *Processor) Process(blocks []parser.TextBlock, stateMap map[string]strin
 
 	// Dispatch jobs
 	for j := range subChunks {
+		if ctx.Err() != nil {
+			break
+		}
 		chunkID := fmt.Sprintf("%s-%d", subChunks[j].BlockID, subChunks[j].SubIndex)
 		if stateMap != nil && stateMap[chunkID] != "" {
 			subChunks[j].Translated = stateMap[chunkID]
@@ -336,6 +349,9 @@ func (p *Processor) Process(blocks []parser.TextBlock, stateMap map[string]strin
 
 	if errorCount > 0 && onProgress != nil {
 		onProgress(-1, totalJobs, fmt.Sprintf("⚠️ 警告: %d 个文本块翻译失败，已降级为原文保留", errorCount))
+	}
+	if ctx.Err() != nil {
+		return nil, stats, ctx.Err()
 	}
 
 	// 3. Reassembly

@@ -1,6 +1,7 @@
 package test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -61,7 +62,7 @@ func TestFailure_LogFile_Generation(t *testing.T) {
 		{ID: "2", OriginalText: strings.Repeat("Fail text to trigger error. ", 10)},
 	}
 
-	_, stats, err := proc.Process(blocks, nil, nil, nil)
+	_, stats, err := proc.Process(context.Background(), blocks, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Expected no error from Process, got %v", err)
 	}

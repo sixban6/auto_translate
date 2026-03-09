@@ -6,6 +6,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const dashboard = document.getElementById('dashboard');
     const startBtn = document.getElementById('startBtn');
     const downloadBtn = document.getElementById('downloadBtn');
+    const pauseBtn = document.getElementById('pauseBtn');
     const configForm = document.getElementById('configForm');
     const terminalLog = document.getElementById('terminalLog');
     const completionChimeInput = configForm.querySelector('input[name="completion_chime"]');
@@ -15,6 +16,37 @@ document.addEventListener('DOMContentLoaded', () => {
     let heartbeatInterval = null;
     let audioContext = null;
     let chimePlayedTaskId = '';
+    let currentTaskId = '';
+
+    const historyBtn = document.getElementById('historyBtn');
+    const historyModal = document.getElementById('historyModal');
+    const closeHistoryBtn = document.getElementById('closeHistoryBtn');
+    const refreshHistoryBtn = document.getElementById('refreshHistoryBtn');
+    const historyTableBody = document.getElementById('historyTableBody');
+    const historyEmptyState = document.getElementById('historyEmptyState');
+
+    function openHistory() {
+        if (!historyModal) return;
+        historyModal.classList.remove('hidden');
+        fetchTasks();
+    }
+
+    function closeHistory() {
+        if (!historyModal) return;
+        historyModal.classList.add('hidden');
+    }
+
+    if (historyBtn) historyBtn.addEventListener('click', openHistory);
+    if (closeHistoryBtn) closeHistoryBtn.addEventListener('click', closeHistory);
+    if (refreshHistoryBtn) refreshHistoryBtn.addEventListener('click', fetchTasks);
+
+    if (historyModal) {
+        historyModal.addEventListener('click', (e) => {
+            if (e.target === historyModal) {
+                closeHistory();
+            }
+        });
+    }
 
     function saveHistory(config) {
         localStorage.setItem('auto_trans_config', JSON.stringify({
@@ -141,6 +173,209 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     fetchRoles();
+
+    function statusText(status) {
+        if (status === 'running') return '进行中';
+        if (status === 'queued') return '排队中';
+        if (status === 'interrupted') return '可恢复';
+        if (status === 'paused') return '已暂停';
+        if (status === 'completed') return '已完成';
+        if (status === 'error') return '失败';
+        return status || '未知';
+    }
+
+    function getStatusClass(status) {
+        if (status === 'running') return 'status-running';
+        if (status === 'queued') return 'status-queued';
+        if (status === 'interrupted') return 'status-interrupted';
+        if (status === 'paused') return 'status-paused';
+        if (status === 'completed') return 'status-completed';
+        if (status === 'error') return 'status-error';
+        return 'status-queued';
+    }
+
+    function renderHistoryTable(tasks) {
+        if (!historyTableBody) return;
+        historyTableBody.innerHTML = '';
+
+        if (!tasks || tasks.length === 0) {
+            if (historyEmptyState) historyEmptyState.classList.remove('hidden');
+            return;
+        }
+        if (historyEmptyState) historyEmptyState.classList.add('hidden');
+
+        const statusPriority = {
+            running: 0,
+            queued: 1,
+            interrupted: 2,
+            paused: 2,
+            completed: 3,
+            error: 4
+        };
+
+        tasks.sort((a, b) => {
+            const pA = statusPriority[a.status] ?? 99;
+            const pB = statusPriority[b.status] ?? 99;
+            if (pA !== pB) return pA - pB;
+            return (b.updated_at || 0) - (a.updated_at || 0);
+        });
+
+        tasks.forEach(task => {
+            const tr = document.createElement('tr');
+
+            const nameTd = document.createElement('td');
+            const fileName = task.original_filename || (task.input_path || '').split('/').pop() || task.id;
+            const nameDiv = document.createElement('div');
+            nameDiv.style.fontWeight = '500';
+            nameDiv.textContent = fileName;
+            const idSpan = document.createElement('div');
+            idSpan.style.fontSize = '11px';
+            idSpan.style.color = 'var(--text-muted)';
+            idSpan.textContent = task.id;
+            nameTd.appendChild(nameDiv);
+            nameTd.appendChild(idSpan);
+
+            const statusTd = document.createElement('td');
+            const displayStatus = task.total > 0 && task.current >= task.total ? 'completed' : task.status;
+            const badge = document.createElement('span');
+            badge.className = `status-badge ${getStatusClass(displayStatus)}`;
+            badge.textContent = statusText(displayStatus);
+            statusTd.appendChild(badge);
+
+            const progressTd = document.createElement('td');
+            if (task.total > 0) {
+                const percent = Math.round((task.current / task.total) * 100);
+                const bar = document.createElement('div');
+                bar.className = 'progress-bar';
+                bar.style.height = '6px';
+                bar.style.marginBottom = '4px';
+                bar.style.backgroundColor = 'rgba(255,255,255,0.1)';
+                const fill = document.createElement('div');
+                fill.className = 'progress-fill';
+                fill.style.width = `${percent}%`;
+                bar.appendChild(fill);
+                const text = document.createElement('div');
+                text.style.fontSize = '12px';
+                text.style.color = 'var(--text-muted)';
+                text.textContent = `${percent}% (${task.current}/${task.total})`;
+                progressTd.appendChild(bar);
+                progressTd.appendChild(text);
+            } else {
+                const text = document.createElement('div');
+                text.style.fontSize = '12px';
+                text.style.color = 'var(--text-muted)';
+                text.textContent = '计算中...';
+                progressTd.appendChild(text);
+            }
+
+            const actionsTd = document.createElement('td');
+            const actionWrapper = document.createElement('div');
+            actionWrapper.className = 'flex';
+            actionWrapper.style.gap = '8px';
+
+            if (task.status === 'running' || task.status === 'queued') {
+                const pauseBtnItem = document.createElement('button');
+                pauseBtnItem.className = 'btn-secondary btn-sm';
+                pauseBtnItem.textContent = '暂停';
+                pauseBtnItem.onclick = (e) => {
+                    e.stopPropagation();
+                    pauseTask(task.id);
+                };
+                actionWrapper.appendChild(pauseBtnItem);
+
+                const viewBtn = document.createElement('button');
+                viewBtn.className = 'btn-secondary btn-sm';
+                viewBtn.textContent = '查看';
+                viewBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    openTask(task);
+                    closeHistory();
+                };
+                actionWrapper.appendChild(viewBtn);
+            }
+
+            if (task.status === 'interrupted' || task.status === 'paused' || task.status === 'error') {
+                const resumeBtn = document.createElement('button');
+                resumeBtn.className = 'btn-primary btn-sm';
+                resumeBtn.textContent = '继续';
+                resumeBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    resumeTask(task);
+                    closeHistory();
+                };
+                actionWrapper.appendChild(resumeBtn);
+            }
+
+            const canDownload = displayStatus === 'completed';
+            if (canDownload) {
+                const downloadBtnItem = document.createElement('button');
+                downloadBtnItem.className = 'btn-secondary btn-sm';
+                downloadBtnItem.textContent = '下载';
+                downloadBtnItem.onclick = (e) => {
+                    e.stopPropagation();
+                    window.location.href = `/api/download?task_id=${task.id}`;
+                };
+                actionWrapper.appendChild(downloadBtnItem);
+            }
+
+            actionsTd.appendChild(actionWrapper);
+
+            tr.appendChild(nameTd);
+            tr.appendChild(statusTd);
+            tr.appendChild(progressTd);
+            tr.appendChild(actionsTd);
+
+            historyTableBody.appendChild(tr);
+        });
+    }
+
+    async function fetchTasks() {
+        try {
+            const res = await fetch('/api/tasks');
+            if (!res.ok) return;
+            const data = await res.json();
+            renderHistoryTable(data.tasks || []);
+        } catch (e) {
+            console.warn('fetch tasks failed', e);
+        }
+    }
+
+    async function pauseTask(taskId) {
+        try {
+            const res = await fetch(`/api/pause?task_id=${taskId}`, { method: 'POST' });
+            if (!res.ok) throw new Error(await res.text());
+            showToast('任务已暂停', 'success');
+            fetchTasks();
+        } catch (e) {
+            showToast('暂停失败: ' + e.message, 'error');
+        }
+    }
+
+    async function resumeTask(task) {
+        try {
+            const res = await fetch(`/api/resume?task_id=${task.id}`, { method: 'POST' });
+            if (!res.ok) throw new Error(await res.text());
+            openTask(task);
+            showToast('已开始恢复任务', 'success');
+        } catch (e) {
+            showToast('恢复失败: ' + e.message, 'error');
+        }
+    }
+
+    function openTask(task) {
+        currentTaskId = task.id;
+        dashboard.classList.remove('hidden');
+        document.getElementById('taskTitle').textContent = `正在翻译: ${(task.input_path || '').split('/').pop() || task.id}`;
+        startBtn.classList.add('hidden');
+        downloadBtn.classList.add('hidden');
+        if (pauseBtn) {
+            pauseBtn.classList.remove('hidden');
+            pauseBtn.onclick = () => pauseTask(task.id);
+        }
+        listenToProgress(task.id);
+    }
+
+    fetchTasks();
 
     // Toast Notification System
     function showToast(message, type = 'info') {
@@ -371,11 +606,16 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             const { task_id } = await response.json();
+            currentTaskId = task_id;
             log(`成功分配任务 ID: ${task_id}`, 'green');
             log(`开始建立长连接实时监听翻译进度...`, 'gray');
 
             // Establish SSE Connection for real-time progress
             listenToProgress(task_id);
+            if (pauseBtn) {
+                pauseBtn.classList.remove('hidden');
+                pauseBtn.onclick = () => pauseTask(task_id);
+            }
 
         } catch (error) {
             console.error(error);
@@ -437,6 +677,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 startBtn.classList.add('hidden');
                 downloadBtn.classList.remove('hidden');
+                if (pauseBtn) pauseBtn.classList.add('hidden');
 
                 downloadBtn.onclick = () => {
                     window.location.href = `/api/download?task_id=${taskId}`;
@@ -471,6 +712,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 showToast('翻译过程中断', 'error');
                 handleDisconnect(taskId);
             }
+
+            if (data.status === 'paused') {
+                clearInterval(heartbeatInterval);
+                eventSource.close();
+                showToast('任务已暂停', 'info');
+                if (pauseBtn) pauseBtn.classList.add('hidden');
+                fetchTasks();
+            }
         };
 
         eventSource.onerror = (e) => {
@@ -494,11 +743,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 const data = await res.json();
                 if (data.resume_supported) {
                     showResumeButton(taskId);
+                    fetchTasks();
                     return;
                 }
             }
+            fetchTasks();
             resetUI();
         } catch (e) {
+            fetchTasks();
             resetUI();
         }
     }
@@ -549,6 +801,7 @@ document.addEventListener('DOMContentLoaded', () => {
         startBtn.classList.remove('hidden');
         const rBtn = document.getElementById('resumeBtn');
         if (rBtn) rBtn.classList.add('hidden');
+        if (pauseBtn) pauseBtn.classList.add('hidden');
         document.getElementById('statusBadge').textContent = '已中断';
         document.getElementById('statusBadge').style.backgroundColor = 'rgba(248, 81, 73, 0.1)';
         document.getElementById('statusBadge').style.color = 'var(--text-red)';

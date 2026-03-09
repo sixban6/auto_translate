@@ -1,11 +1,13 @@
 package test
 
 import (
+	"context"
+	"testing"
+
 	"auto_translate/pkg/config"
 	"auto_translate/pkg/parser"
 	"auto_translate/pkg/processor"
 	"auto_translate/pkg/translator"
-	"testing"
 )
 
 func TestProcessorSkipCompleted(t *testing.T) {
@@ -30,7 +32,7 @@ func TestProcessorSkipCompleted(t *testing.T) {
 
 	proc := processor.New(cfg, tr)
 
-	translatedBlocks, stats, err := proc.Process(blocks, stateMap, nil, nil)
+	translatedBlocks, stats, err := proc.Process(context.Background(), blocks, stateMap, nil, nil)
 	if err != nil {
 		t.Fatalf("Process error: %v", err)
 	}

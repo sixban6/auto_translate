@@ -1,6 +1,7 @@
 package test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -72,7 +73,7 @@ func TestProcessor(t *testing.T) {
 	}
 
 	start := time.Now()
-	translatedBlocks, _, err := proc.Process(blocks, nil, nil, nil)
+	translatedBlocks, _, err := proc.Process(context.Background(), blocks, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Process error: %v", err)
 	}
@@ -120,7 +121,7 @@ func TestProcessor_Fallback(t *testing.T) {
 	}
 
 	warningReceived := false
-	translatedBlocks, _, err := proc.Process(blocks, nil, func(current, total int, msg string) {
+	translatedBlocks, _, err := proc.Process(context.Background(), blocks, nil, func(current, total int, msg string) {
 		if strings.Contains(msg, "降级为原文保留") || strings.Contains(msg, "fallback") {
 			warningReceived = true
 		}
@@ -183,7 +184,7 @@ func TestProcessor_ConcurrencyQueueTimeout(t *testing.T) {
 	}
 
 	timeoutCount := 0
-	_, _, err := proc.Process(blocks, nil, func(current, total int, msg string) {
+	_, _, err := proc.Process(context.Background(), blocks, nil, func(current, total int, msg string) {
 		if strings.Contains(msg, "context deadline exceeded") || strings.Contains(msg, "Client.Timeout exceeded") || strings.Contains(msg, "API request failed") || strings.Contains(msg, "Retrying") || strings.Contains(msg, "完全失败") {
 			timeoutCount++
 		}

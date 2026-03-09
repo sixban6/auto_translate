@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -61,7 +62,7 @@ func main() {
 	log.Printf("Starting translation with concurrency %d...", cfg.Concurrency)
 	startTime := time.Now()
 
-	translatedBlocks, stats, err := proc.Process(blocks, nil, func(current, total int, msg string) {
+	translatedBlocks, stats, err := proc.Process(context.Background(), blocks, nil, func(current, total int, msg string) {
 		if msg != "" {
 			log.Println(msg)
 		} else if current%10 == 0 || current == total {
