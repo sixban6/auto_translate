@@ -140,14 +140,3 @@ func AutoCalculateMaxChunkSize(modelName string) int {
 	}
 	return size
 }
-
-func maxConcurrencyByModel(modelName string) int {
-	model := strings.ToLower(modelName)
-	if strings.Contains(model, "qwen") {
-		return 3
-	}
-	if strings.Contains(model, "deepseek") {
-		return 4
-	}
-	return 5
-}

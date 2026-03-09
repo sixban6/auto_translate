@@ -6,6 +6,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
@@ -44,7 +45,6 @@ func getSystemRAMBytes() (uint64, error) {
 		}
 		return kb * 1024, nil
 	case "windows":
-		// Get-CimInstance Win32_ComputerSystem | Select-Object -ExpandProperty TotalPhysicalMemory
 		cmd := exec.Command("powershell", "-NoProfile", "-Command", "Get-CimInstance Win32_ComputerSystem | Select-Object -ExpandProperty TotalPhysicalMemory")
 		out, err := cmd.Output()
 		if err != nil {
@@ -59,10 +59,14 @@ func getSystemRAMBytes() (uint64, error) {
 // getModelSizeBytes asks the local Ollama API for the size of the target model in bytes
 func getModelSizeBytes(apiURL string, targetModel string) (uint64, error) {
 	baseURL := "http://localhost:11434"
-	if strings.HasPrefix(apiURL, "http://") || strings.HasPrefix(apiURL, "https://") {
-		parts := strings.Split(apiURL, "/")
-		if len(parts) >= 3 {
-			baseURL = parts[0] + "//" + parts[2]
+
+	// 【修复 3】使用标准库解析 URL，避免字符串截取导致的越界或格式错误
+	if apiURL != "" {
+		if !strings.HasPrefix(apiURL, "http://") && !strings.HasPrefix(apiURL, "https://") {
+			apiURL = "http://" + apiURL
+		}
+		if parsed, err := url.Parse(apiURL); err == nil {
+			baseURL = parsed.Scheme + "://" + parsed.Host
 		}
 	}
 
@@ -92,12 +96,23 @@ func getModelSizeBytes(apiURL string, targetModel string) (uint64, error) {
 		return 0, err
 	}
 
-	for _, m := range result.Models {
-		nameParts := strings.Split(m.Name, ":")
-		targetParts := strings.Split(targetModel, ":")
+	// 【修复你发现的 Bug】：拆分为两阶段匹配，确保模型大小获取精准无误
 
-		if m.Name == targetModel || (len(nameParts) > 0 && len(targetParts) > 0 && nameParts[0] == targetParts[0]) {
+	// 第一阶段：完全精确匹配 (例如用户输入了 qwen3.5:9b)
+	for _, m := range result.Models {
+		if m.Name == targetModel {
 			return m.Size, nil
+		}
+	}
+
+	// 第二阶段：前缀模糊匹配 (仅当 targetModel 没有带 ":" 标签时才允许)
+	targetParts := strings.Split(targetModel, ":")
+	if len(targetParts) == 1 {
+		for _, m := range result.Models {
+			nameParts := strings.Split(m.Name, ":")
+			if len(nameParts) > 0 && nameParts[0] == targetParts[0] {
+				return m.Size, nil
+			}
 		}
 	}
 
@@ -123,16 +138,21 @@ func autoCalculateLogic(ramBytes uint64, modSizeBytes uint64, osType string) int
 
 	available := gbRAM - reserved
 
-	// Estimated Model Cost (1.6x safety budget)
-	estimatedModelMem := gbModel * 1.6
+	// 【修复 1】重写 LLM 内存占用模型
+	// 模型本体仅加载一次 (增加 10% 作为图计算/元数据冗余)
+	baseModelMem := gbModel * 1.1
 
-	// Concurrency Math
-	var recommended int = 1
-	if estimatedModelMem > 0 && available >= estimatedModelMem { // guard zero size
-		recommended = int(math.Floor(available / estimatedModelMem))
-	} else if available <= 0 {
-		recommended = 1 // Not enough memory above reserved
+	if available <= baseModelMem {
+		return 1 // 剩余内存勉强只够跑单线程
 	}
+
+	// 扣除模型本体后，剩下的内存全部用来分配给并发的 KV Cache
+	availableForKV := available - baseModelMem
+
+	// 预估每个并发请求消耗的 KV Cache (1.5GB 足够支撑大部分 4k-8k 上下文)
+	kvCachePerRequest := 1.5
+
+	recommended := int(math.Floor(availableForKV / kvCachePerRequest))
 
 	// Bounding logic
 	if recommended < 1 {
@@ -151,9 +171,21 @@ func maxConcurrencyByCPU() int {
 		return 1
 	}
 	if cap > 4 {
-		return 4
+		return 4 // 强行限制最大并发为 4，防止桌面级 CPU 满载无响应
 	}
 	return cap
+}
+
+// 【修复 4】补充缺失的函数：根据模型量级限制并发，防止巨型模型挤爆显存/内存
+func maxConcurrencyByModel(modelName string) int {
+	name := strings.ToLower(modelName)
+	if strings.Contains(name, "70b") || strings.Contains(name, "72b") {
+		return 1
+	}
+	if strings.Contains(name, "32b") || strings.Contains(name, "34b") {
+		return 2
+	}
+	return 5 // 14B 及以下的小模型，允许走到 CPU 限制的上限
 }
 
 // tryRestartOllama attempts to set the env var and restart the Ollama process
@@ -180,14 +212,22 @@ func tryRestartOllama(concurrency int) error {
 		exec.Command("taskkill", "/F", "/IM", "ollama app.exe").Run()
 		time.Sleep(1 * time.Second)
 		cmd := exec.Command("cmd", "/c", "start", "ollama", "serve")
+		// 【修复 2】关键：显式将环境变量注入新进程，否则 setx 在当前进程树不会立刻生效
+		cmd.Env = append(os.Environ(), "OLLAMA_NUM_PARALLEL="+envVal)
 		return cmd.Start()
 	case "linux":
+		// 如果是通过 Systemd 运行的
 		if err := exec.Command("systemctl", "--user", "restart", "ollama").Run(); err == nil {
+			// Systemd 方式需要用户在 service 文件中配置环境，这里的动态配置可能不会生效
+			// 但暂保留原逻辑
 			return nil
 		}
+		// 回退到手动进程管理
 		exec.Command("killall", "ollama").Run()
 		time.Sleep(1 * time.Second)
-		cmd := exec.Command("sh", "-c", fmt.Sprintf("OLLAMA_NUM_PARALLEL=%s ollama serve > /dev/null 2>&1 &", envVal))
+		cmd := exec.Command("sh", "-c", "ollama serve > /dev/null 2>&1 &")
+		// 【修复 2】关键：显式注入
+		cmd.Env = append(os.Environ(), "OLLAMA_NUM_PARALLEL="+envVal)
 		return cmd.Start()
 	}
 	return fmt.Errorf("unsupported os for auto-restart")

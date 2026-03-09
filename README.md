@@ -25,7 +25,7 @@ bash start.sh
 
 启动成功后, 会自动打开浏览器，显示翻译程序
 
-![img_1.png](img_1.png)
+<video src="./auto-trans.mp4" controls="controls" width="100%" muted="muted"></video>
 
 停止程序
 ```bash
