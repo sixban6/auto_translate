@@ -25,8 +25,9 @@ bash start.sh
 
 启动成功后, 会自动打开浏览器，显示翻译程序
 
-<video src="./auto-trans.mp4" controls="controls" width="100%" muted="muted"></video>
-
+<video src="https://github.com/sixban6/auto_translate/raw/main/auto-trans.mp4" controls="controls" style="max-width: 100%; display: block;">
+  你的浏览器不支持 HTML5 视频。
+</video>
 停止程序
 ```bash
 chmod +x start.sh
