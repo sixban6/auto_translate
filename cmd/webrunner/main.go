@@ -513,18 +513,117 @@ func handleProgressSSE(w http.ResponseWriter, r *http.Request) {
 
 func handleDownload(w http.ResponseWriter, r *http.Request) {
 	taskID := r.URL.Query().Get("task_id")
+
+	var inputPath, outPath string
+	var cfg *config.Config
+
 	mu.Lock()
 	task, ok := tasks[taskID]
 	mu.Unlock()
+	if ok {
+		if task.Status != "completed" {
+			http.Error(w, "File not ready or task not found", http.StatusNotFound)
+			return
+		}
+		inputPath = task.InputPath
+		outPath = task.OutPath
+		cfg = task.Config
+	} else {
+		statePath := latestStateFile(runtimeStatesDir, taskID)
+		histPath := latestStateFile(historyStatesDir, taskID)
+		if stateFileModTime(histPath).After(stateFileModTime(statePath)) {
+			statePath = histPath
+		}
+		if statePath == "" {
+			http.Error(w, "File not ready or task not found", http.StatusNotFound)
+			return
+		}
+		var state TaskState
+		data, err := os.ReadFile(statePath)
+		if err != nil || json.Unmarshal(data, &state) != nil {
+			http.Error(w, "Failed to read task state", http.StatusInternalServerError)
+			return
+		}
+		normalizeState(&state)
+		status, _, _ := resolveTaskState(state)
+		if status != "completed" {
+			http.Error(w, "File not ready or task not found", http.StatusNotFound)
+			return
+		}
+		inputPath = state.InputPath
+		outPath = state.OutPath
+		cfg = state.Config
+	}
 
-	if !ok || task.Status != "completed" {
-		http.Error(w, "File not ready or task not found", http.StatusNotFound)
+	if err := ensureOutputFresh(inputPath, outPath, cfg); err != nil {
+		http.Error(w, "Failed to prepare translated file: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	w.Header().Set("Content-Disposition", "attachment; filename=translated_"+filepath.Base(task.InputPath))
+	w.Header().Set("Content-Disposition", "attachment; filename=translated_"+filepath.Base(inputPath))
 	w.Header().Set("Content-Type", "application/octet-stream")
-	http.ServeFile(w, r, task.OutPath)
+	http.ServeFile(w, r, outPath)
+}
+
+func stateFileModTime(path string) time.Time {
+	if st, err := os.Stat(path); err == nil {
+		return st.ModTime()
+	}
+	return time.Time{}
+}
+
+// ensureOutputFresh rebuilds the output file when a state file has been
+// modified more recently than the output file (e.g. hand-edited fixes to
+// completed_chunks), or when the output file is missing. On rebuild, chunks
+// are read from the newest state file so hand edits always win over stale
+// in-memory data.
+func ensureOutputFresh(inputPath, outPath string, cfg *config.Config) error {
+	outStat, outErr := os.Stat(outPath)
+	if outErr != nil {
+		if !os.IsNotExist(outErr) {
+			return outErr
+		}
+	} else {
+		runtimePath := runtimeStatePath(inputPath)
+		historyPath := historyStatePath(inputPath)
+		newestState := stateFileModTime(runtimePath)
+		if stateFileModTime(historyPath).After(newestState) {
+			newestState = stateFileModTime(historyPath)
+		}
+		if !newestState.After(outStat.ModTime()) {
+			return nil // output is already up to date
+		}
+	}
+
+	statePath := runtimeStatePath(inputPath)
+	if stateFileModTime(historyStatePath(inputPath)).After(stateFileModTime(statePath)) {
+		statePath = historyStatePath(inputPath)
+	}
+	var completedChunks map[string]string
+	if data, err := os.ReadFile(statePath); err == nil {
+		var state TaskState
+		if json.Unmarshal(data, &state) == nil {
+			completedChunks = state.CompletedChunks
+		}
+	}
+
+	p, err := parser.GetParser(strings.ToLower(filepath.Ext(inputPath)))
+	if err != nil {
+		return err
+	}
+	blocks, err := p.Extract(inputPath)
+	if err != nil {
+		return err
+	}
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
+	proc := processor.New(cfg, nil)
+	translatedBlocks := proc.Reassemble(blocks, completedChunks)
+	if err := p.Assemble(translatedBlocks, outPath, cfg.Bilingual); err != nil {
+		return err
+	}
+	return nil
 }
 
 func handleDownloadFailures(w http.ResponseWriter, r *http.Request) {
@@ -1251,6 +1350,12 @@ func runTranslationTask(t *TranslationTask) {
 	t.Status = "completed"
 	t.StatusReason = ""
 	saveTaskState(t)
+	// State is saved after the output is assembled, so bump the output's
+	// mtime: download uses "state newer than output" as the signal that the
+	// state was hand-edited and the output needs rebuilding.
+	if now := time.Now(); t.OutPath != "" {
+		os.Chtimes(t.OutPath, now, now)
+	}
 	sendLog(fmt.Sprintf("📊 翻译统计: 成功=%d 术语降级=%d 拒答=%d 完全失败=%d", stats.SuccessCount, stats.FallbackCount, stats.RefusedCount, stats.FailureCount), "gray")
 	sendLog("🎉 生成最终电子书/文档成功！", "green")
 	elapsed := time.Duration(currentElapsedSec(t, time.Now())) * time.Second

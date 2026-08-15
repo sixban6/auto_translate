@@ -164,13 +164,9 @@ func shouldMergeEpubPhrasePiece(current, next string) bool {
 	return true
 }
 
-// Process handles chunking, concurrent translation, and reassembly.
-func (p *Processor) Process(ctx context.Context, blocks []parser.TextBlock, stateMap map[string]string, onProgress func(int, int, string), onChunkCompleted func(string, string)) ([]parser.TranslatedBlock, TranslationStats, error) {
-	var stats TranslationStats
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
+// buildSubChunks applies the same context-merge and chunking logic used by
+// Process, so offline reassembly produces identical chunk IDs.
+func (p *Processor) buildSubChunks(blocks []parser.TextBlock) ([]SubChunk, map[string]bool) {
 	// 0. Pre-processing (Context Aggregation for short texts)
 	var mergedBlocks []parser.TextBlock
 	skipMap := make(map[string]bool)
@@ -224,6 +220,56 @@ func (p *Processor) Process(ctx context.Context, blocks []parser.TextBlock, stat
 			})
 		}
 	}
+	return subChunks, skipMap
+}
+
+// Reassemble rebuilds translated blocks purely from a completed-chunks map
+// (no model calls). Chunks missing from stateMap fall back to their original
+// text, mirroring Process's degradation behavior.
+func (p *Processor) Reassemble(blocks []parser.TextBlock, stateMap map[string]string) []parser.TranslatedBlock {
+	subChunks, skipMap := p.buildSubChunks(blocks)
+
+	blocksMap := make(map[string][]SubChunk)
+	for _, sc := range subChunks {
+		chunkID := fmt.Sprintf("%s-%d", sc.BlockID, sc.SubIndex)
+		if translated := stateMap[chunkID]; translated != "" {
+			sc.Translated = translated
+		} else {
+			sc.Translated = sc.Text
+		}
+		blocksMap[sc.BlockID] = append(blocksMap[sc.BlockID], sc)
+	}
+
+	translatedBlocks := make([]parser.TranslatedBlock, 0, len(blocks))
+	for _, b := range blocks {
+		if skipMap[b.ID] {
+			translatedBlocks = append(translatedBlocks, parser.TranslatedBlock{
+				ID:             b.ID,
+				TranslatedText: "<!--merged-->",
+			})
+			continue
+		}
+		var sb strings.Builder
+		for _, c := range blocksMap[b.ID] {
+			sb.WriteString(c.Translated)
+		}
+		translatedBlocks = append(translatedBlocks, parser.TranslatedBlock{
+			ID:             b.ID,
+			TranslatedText: sb.String(),
+		})
+	}
+	return translatedBlocks
+}
+
+// Process handles chunking, concurrent translation, and reassembly.
+func (p *Processor) Process(ctx context.Context, blocks []parser.TextBlock, stateMap map[string]string, onProgress func(int, int, string), onChunkCompleted func(string, string)) ([]parser.TranslatedBlock, TranslationStats, error) {
+	var stats TranslationStats
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	// 0+1. Pre-processing (context aggregation) and chunking
+	subChunks, skipMap := p.buildSubChunks(blocks)
 
 	totalJobs := len(subChunks)
 	if onProgress != nil {
