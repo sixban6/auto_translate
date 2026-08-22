@@ -21,11 +21,13 @@ func TestIntegration(t *testing.T) {
 
 	// Setup mock server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The input has two paragraphs sharing one chapter batch; reply with
+		// two translated paragraphs to preserve the mapping.
 		respMap := map[string]interface{}{
 			"choices": []map[string]interface{}{
 				{
 					"message": map[string]string{
-						"content": "Mock Translation",
+						"content": "译文甲\n\n译文乙",
 					},
 				},
 			},
@@ -69,13 +71,16 @@ func TestIntegration(t *testing.T) {
 	}
 
 	resultStr := string(resultBytes)
-	if !strings.Contains(resultStr, "Mock Translation") {
-		t.Errorf("Output did not contain translation. Got %s", resultStr)
+	if !strings.Contains(resultStr, "译文甲") || !strings.Contains(resultStr, "译文乙") {
+		t.Errorf("Output did not contain translations. Got %s", resultStr)
 	}
 	if !strings.Contains(resultStr, "Great Integration") {
 		t.Errorf("Output did not contain original in bilingual mode. Got %s", resultStr)
 	}
-	if strings.Index(resultStr, "Hello World.") > strings.Index(resultStr, "Mock Translation") {
+	if strings.Index(resultStr, "Hello World.") > strings.Index(resultStr, "译文甲") {
+		t.Errorf("Expected bilingual order to keep original above translation. Got %s", resultStr)
+	}
+	if strings.Index(resultStr, "Great Integration") > strings.Index(resultStr, "译文乙") {
 		t.Errorf("Expected bilingual order to keep original above translation. Got %s", resultStr)
 	}
 }

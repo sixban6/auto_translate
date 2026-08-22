@@ -12,6 +12,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -49,36 +50,41 @@ type TranslationTask struct {
 	SrcFileName     string
 	Ctx             context.Context
 	Cancel          context.CancelFunc
-	StateMu         sync.Mutex
-	LastResumeAt    time.Time
+	// StopExportRequested marks a task the user asked to terminate early and
+	// export with whatever has been translated so far.
+	StopExportRequested   bool
+	StateMu               sync.Mutex
+	LastResumeAt          time.Time
 	ElapsedSecAccumulated int64
-	DoneCh          chan struct{}
+	DoneCh                chan struct{}
 }
 
 type TaskState struct {
-	ID              string                     `json:"id"`
-	Total           int                        `json:"total"`
-	Current         int                        `json:"current"`
-	Status          string                     `json:"status"`
-	InputPath       string                     `json:"input_path"`
-	OutPath         string                     `json:"out_path"`
-	Config          *config.Config             `json:"config"`
-	CompletedChunks map[string]string          `json:"completed_chunks"`
-	Stats           processor.TranslationStats `json:"stats"`
-	InstanceID      string                     `json:"instance_id"`
-	LastHeartbeatTs int64                      `json:"last_heartbeat_ts"`
-	StatusReason    string                     `json:"status_reason"`
-	SrcFileName     string                    `json:"src_file_name"`
-	StartedAt       int64                      `json:"started_at"`
-	LastResumeAt    int64                      `json:"last_resume_at"`
-	ElapsedSecAccumulated int64               `json:"elapsed_sec_accumulated"`
-	OriginalFilename string                   `json:"original_filename,omitempty"`
+	ID                    string                     `json:"id"`
+	Total                 int                        `json:"total"`
+	Current               int                        `json:"current"`
+	Status                string                     `json:"status"`
+	InputPath             string                     `json:"input_path"`
+	OutPath               string                     `json:"out_path"`
+	Config                *config.Config             `json:"config"`
+	CompletedChunks       map[string]string          `json:"completed_chunks"`
+	Stats                 processor.TranslationStats `json:"stats"`
+	InstanceID            string                     `json:"instance_id"`
+	LastHeartbeatTs       int64                      `json:"last_heartbeat_ts"`
+	StatusReason          string                     `json:"status_reason"`
+	SrcFileName           string                     `json:"src_file_name"`
+	StartedAt             int64                      `json:"started_at"`
+	LastResumeAt          int64                      `json:"last_resume_at"`
+	ElapsedSecAccumulated int64                      `json:"elapsed_sec_accumulated"`
+	OriginalFilename      string                     `json:"original_filename,omitempty"`
 }
 
 const (
 	runtimeStatesDir = "temp_uploads/runtime_states"
 	historyStatesDir = "temp_uploads/history_states"
 )
+
+var stateWriteMu sync.Mutex
 
 func saveTaskState(t *TranslationTask) {
 	if t.Status == "deleted" {
@@ -92,33 +98,35 @@ func saveTaskState(t *TranslationTask) {
 		lastHeartbeat = time.Now()
 	}
 	state := TaskState{
-		ID:              t.ID,
-		Total:           t.Total,
-		Current:         t.Current,
-		Status:          t.Status,
-		InputPath:       t.InputPath,
-		OutPath:         t.OutPath,
-		Config:          t.Config,
-		CompletedChunks: t.CompletedChunks,
-		Stats:           t.Stats,
-		InstanceID:      t.InstanceID,
-		LastHeartbeatTs: lastHeartbeat.Unix(),
-		StatusReason:    t.StatusReason,
-		SrcFileName:     t.SrcFileName,
-		StartedAt:       unixOrZero(t.StartedAt),
-		LastResumeAt:    unixOrZero(t.LastResumeAt),
+		ID:                    t.ID,
+		Total:                 t.Total,
+		Current:               t.Current,
+		Status:                t.Status,
+		InputPath:             t.InputPath,
+		OutPath:               t.OutPath,
+		Config:                t.Config,
+		CompletedChunks:       t.CompletedChunks,
+		Stats:                 t.Stats,
+		InstanceID:            t.InstanceID,
+		LastHeartbeatTs:       lastHeartbeat.Unix(),
+		StatusReason:          t.StatusReason,
+		SrcFileName:           t.SrcFileName,
+		StartedAt:             unixOrZero(t.StartedAt),
+		LastResumeAt:          unixOrZero(t.LastResumeAt),
 		ElapsedSecAccumulated: t.ElapsedSecAccumulated,
 	}
 
+	data, _ := json.MarshalIndent(state, "", "  ")
+	stateWriteMu.Lock()
 	ensureStateDirs()
 	statePath := statePathForStatus(t.InputPath, t.Status)
-	data, _ := json.MarshalIndent(state, "", "  ")
 	os.WriteFile(statePath, data, 0644)
 	if statePath == runtimeStatePath(t.InputPath) {
 		removeIfExists(historyStatePath(t.InputPath))
 	} else {
 		removeIfExists(runtimeStatePath(t.InputPath))
 	}
+	stateWriteMu.Unlock()
 }
 
 func unixOrZero(t time.Time) int64 {
@@ -282,8 +290,10 @@ func main() {
 		go taskWorker()
 	}
 
-	// Serve Static Files
-	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("web/static"))))
+	// Serve Static Files. no-cache forces revalidation so UI updates are
+	// picked up immediately instead of being served from browser heuristics.
+	staticHandler := http.StripPrefix("/static/", http.FileServer(http.Dir("web/static")))
+	http.Handle("/static/", noCache(staticHandler))
 
 	// Serve UI
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -291,6 +301,7 @@ func main() {
 			http.NotFound(w, r)
 			return
 		}
+		w.Header().Set("Cache-Control", "no-cache")
 		http.ServeFile(w, r, "web/templates/index.html")
 	})
 
@@ -320,6 +331,7 @@ func main() {
 	http.HandleFunc("/api/tasks/", handleTaskByID)
 	// API Endpoint: Pause Task
 	http.HandleFunc("/api/pause", handlePause)
+	http.HandleFunc("/api/stop_export", handleStopExport)
 
 	port := getAvailablePort(4000)
 	fmt.Printf("Web server is running beautifully at http://localhost:%d\n", port)
@@ -328,6 +340,13 @@ func main() {
 	go openBrowser(fmt.Sprintf("http://localhost:%d", port))
 
 	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", port), nil))
+}
+
+func noCache(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // getAvailablePort returns an available port starting from the given startPort
@@ -714,12 +733,117 @@ func handleTaskStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// applyResumeConfig overlays user-editable settings from a resume request
+// onto a task's stored config, so a paused task can continue under a
+// different model/engine. Zero or empty fields in the request keep the
+// original values; the file bindings are never touched. It reports whether
+// the model, engine or API endpoint actually changed.
+func applyResumeConfig(dst *config.Config, src *config.Config, present map[string]bool) bool {
+	if dst == nil || src == nil {
+		return false
+	}
+	switched := false
+	if src.Engine != "" && src.Engine != dst.Engine {
+		dst.Engine = src.Engine
+		switched = true
+	}
+	if src.Model != "" && src.Model != dst.Model {
+		dst.Model = src.Model
+		switched = true
+	}
+	if src.APIURL != "" && src.APIURL != dst.APIURL {
+		dst.APIURL = src.APIURL
+		switched = true
+	}
+	if src.APIKey != "" {
+		dst.APIKey = src.APIKey
+	}
+	if src.Temperature > 0 {
+		dst.Temperature = src.Temperature
+	}
+	if src.MaxChunkSize > 0 {
+		dst.MaxChunkSize = src.MaxChunkSize
+	}
+	if src.MaxRetries > 0 {
+		dst.MaxRetries = src.MaxRetries
+	}
+	if src.RequestTimeoutSec > 0 {
+		dst.RequestTimeoutSec = src.RequestTimeoutSec
+	}
+	if len(src.Glossary) > 0 {
+		dst.Glossary = src.Glossary
+	}
+	if src.PromptRole != "" {
+		dst.PromptRole = src.PromptRole
+	}
+	if src.Prompt != "" {
+		dst.Prompt = src.Prompt
+	}
+	if present["bilingual"] {
+		dst.Bilingual = src.Bilingual
+	}
+	if switched {
+		// Re-plan auto-tuned runtime settings for the new engine/model when
+		// the request did not pin them explicitly. The batch size is restored
+		// afterwards so completed-chunk keys stay aligned with the original
+		// run (legacy per-block keys cover any mismatch anyway).
+		keepChunk := dst.MaxChunkSize
+		if src.Concurrency > 0 {
+			dst.Concurrency = src.Concurrency
+		} else {
+			dst.Concurrency = 0
+		}
+		dst.AutoDetectAndCalculate()
+		if src.MaxChunkSize <= 0 {
+			dst.MaxChunkSize = keepChunk
+		}
+	}
+	return switched
+}
+
 func handleResume(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	taskID := r.URL.Query().Get("task_id")
+
+	// Optional JSON body: a fresh config from the UI so the user can switch
+	// model, engine or parameters before resuming. Omitted fields keep the
+	// task's original values, so a bare POST behaves exactly like before.
+	var override config.Config
+	var present map[string]bool
+	if r.Body != nil {
+		reqBody, err := io.ReadAll(io.LimitReader(r.Body, 4<<20))
+		if err != nil {
+			http.Error(w, "Failed to read request body", http.StatusBadRequest)
+			return
+		}
+		if len(reqBody) > 0 {
+			var raw map[string]json.RawMessage
+			if err := json.Unmarshal(reqBody, &raw); err != nil {
+				http.Error(w, "Invalid config JSON: "+err.Error(), http.StatusBadRequest)
+				return
+		}
+			if err := json.Unmarshal(reqBody, &override); err != nil {
+				http.Error(w, "Invalid config JSON: "+err.Error(), http.StatusBadRequest)
+				return
+		}
+			present = make(map[string]bool, len(raw))
+			for k := range raw {
+				present[k] = true
+		}
+			if override.PromptRole != "" {
+				prompt, err := loadPromptByRole(override.PromptRole)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				override.Prompt = prompt
+			}
+		}
+	}
+
 	mu.Lock()
 	t, ok := tasks[taskID]
 	mu.Unlock()
@@ -744,24 +868,33 @@ func handleResume(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		normalizeState(&state)
+		if state.Config == nil {
+			// Hand-written/minimal state files may omit the config; rebuild a
+			// sane default so the resumed task does not crash.
+			state.Config = &config.Config{
+				InputFile:  state.InputPath,
+				OutputFile: state.OutPath,
+			}
+			state.Config.AutoDetectAndCalculate()
+		}
 		status, _, _ := resolveTaskState(state)
 		state.Status = status
 
 		t = &TranslationTask{
-			ID:              state.ID,
-			Status:          state.Status,
-			Total:           state.Total,
-			Current:         state.Current,
-			Config:          state.Config,
-			InputPath:       state.InputPath,
-			OutPath:         state.OutPath,
-			CompletedChunks: state.CompletedChunks,
-			Stats:           state.Stats,
-			InstanceID:      instanceID,
-			StatusReason:    state.StatusReason,
-			SrcFileName:     state.SrcFileName,
+			ID:                    state.ID,
+			Status:                state.Status,
+			Total:                 state.Total,
+			Current:               state.Current,
+			Config:                state.Config,
+			InputPath:             state.InputPath,
+			OutPath:               state.OutPath,
+			CompletedChunks:       state.CompletedChunks,
+			Stats:                 state.Stats,
+			InstanceID:            instanceID,
+			StatusReason:          state.StatusReason,
+			SrcFileName:           state.SrcFileName,
 			ElapsedSecAccumulated: state.ElapsedSecAccumulated,
-			DoneCh:          make(chan struct{}),
+			DoneCh:                make(chan struct{}),
 		}
 		if state.StartedAt > 0 {
 			t.StartedAt = time.Unix(state.StartedAt, 0)
@@ -787,6 +920,15 @@ func handleResume(w http.ResponseWriter, r *http.Request) {
 	t.MessageCh = make(chan webtask.LogMsg, 100)
 	t.InstanceID = instanceID
 	t.LastHeartbeat = time.Now()
+
+	if present != nil && t.Config != nil {
+		if applyResumeConfig(t.Config, &override, present) {
+			safeSendTaskMessage(t, webtask.LogMsg{
+				Type:    "gray",
+				Message: fmt.Sprintf("🔁 恢复时已应用新配置：模型 %s（引擎 %s）", t.Config.Model, config.EngineLabel(t.Config.Engine)),
+			})
+		}
+	}
 	saveTaskState(t)
 
 	taskQueue <- t
@@ -829,7 +971,244 @@ func handlePause(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"task_id": t.ID, "status": "paused"})
 }
 
+// buildPartialOutput reassembles the output file purely from the chunks that
+// have been translated so far (no model calls); paragraphs without a
+// translation keep their original text. Returns how many blocks carry a real
+// translation and the total block count.
+func buildPartialOutput(t *TranslationTask, p parser.Parser, blocks []parser.TextBlock) (int, int, error) {
+	t.StateMu.Lock()
+	completed := make(map[string]string, len(t.CompletedChunks))
+	for k, v := range t.CompletedChunks {
+		completed[k] = v
+	}
+	t.StateMu.Unlock()
+
+	proc := processor.New(t.Config, translator.New(t.Config))
+	translatedBlocks := proc.Reassemble(blocks, completed)
+
+	translatedCount := 0
+	for i, b := range blocks {
+		got := strings.TrimSpace(translatedBlocks[i].TranslatedText)
+		if got != "" && got != strings.TrimSpace(b.OriginalText) {
+			translatedCount++
+		}
+	}
+	return translatedCount, len(blocks), p.Assemble(translatedBlocks, t.Config.OutputFile, t.Config.Bilingual)
+}
+
+// finishPartialExport marks a terminated-early task as completed and notifies
+// listeners.
+func finishPartialExport(t *TranslationTask, translatedCount, total int) {
+	if t.Status == "deleted" {
+		return
+	}
+	accumulateElapsed(t, time.Now())
+	t.Status = "completed"
+	t.StatusReason = "stopped_partial"
+	t.Current = t.Total
+	saveTaskState(t)
+	// Same contract as normal completion: bump the output mtime after the
+	// state save so download's freshness check does not rebuild the file.
+	if now := time.Now(); t.OutPath != "" {
+		os.Chtimes(t.OutPath, now, now)
+	}
+	safeSendTaskMessage(t, webtask.LogMsg{
+		Type:    "orange",
+		Message: fmt.Sprintf("🛑 已按要求终止翻译，未完成部分保留原文（已翻译 %d/%d 段）", translatedCount, total),
+	})
+	safeSendTaskMessage(t, webtask.LogMsg{
+		Type:    "green",
+		Message: "🎉 部分译本已生成，可下载查看",
+		Status:  "completed",
+		Total:   t.Total,
+		Current: t.Total,
+	})
+}
+
+// handleStopExport terminates an active task early and exports the output
+// file built from the paragraphs translated so far. For running tasks the
+// worker assembles the file after cancellation; paused/queued tasks are
+// assembled inline.
+func handleStopExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	taskID := r.URL.Query().Get("task_id")
+	mu.Lock()
+	t, ok := tasks[taskID]
+	if !ok {
+		mu.Unlock()
+		http.Error(w, "Task not found", http.StatusNotFound)
+		return
+	}
+	status := t.Status
+	if t.StopExportRequested {
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"task_id": taskID, "status": "stopping"})
+		return
+	}
+	if status != "running" && status != "queued" && status != "paused" {
+		mu.Unlock()
+		http.Error(w, "Task not active", http.StatusConflict)
+		return
+	}
+	t.StopExportRequested = true
+	if status != "running" {
+		// Keep the worker from picking the task up mid-export; its pickup
+		// check skips paused tasks.
+		t.Status = "paused"
+		t.StatusReason = "stopped_by_user"
+	}
+	cancel := t.Cancel
+	mu.Unlock()
+
+	if status == "running" {
+		if cancel != nil {
+			cancel()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"task_id": taskID, "status": "stopping"})
+		return
+	}
+
+	// Paused/queued: export inline from the persisted chunks.
+	p, err := parser.GetParser(strings.ToLower(filepath.Ext(t.InputPath)))
+	if err == nil {
+		var blocks []parser.TextBlock
+		blocks, err = p.Extract(t.InputPath)
+		if err == nil {
+			var translatedCount, total int
+			translatedCount, total, err = buildPartialOutput(t, p, blocks)
+			if err == nil {
+				finishPartialExport(t, translatedCount, total)
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"task_id": taskID, "status": "completed",
+					"translated": translatedCount, "total": total,
+				})
+				return
+			}
+		}
+	}
+	// Export failed: put the task back so it stays resumable.
+	mu.Lock()
+	t.Status = "paused"
+	t.StatusReason = "stop_export_failed"
+	t.StopExportRequested = false
+	saveTaskState(t)
+	mu.Unlock()
+	http.Error(w, fmt.Sprintf("export failed: %v", err), http.StatusInternalServerError)
+}
+
 func handleTasks(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		handleTasksList(w, r)
+	case http.MethodDelete:
+		handleTasksBatchDelete(w, r)
+	default:
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleTasksBatchDelete deletes many tasks at once. The ids come from the
+// optional JSON body {"ids": [...]}; with no ids, every task known to this
+// instance (history state files, runtime state files and in-memory tasks)
+// is removed.
+func handleTasksBatchDelete(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		IDs []string `json:"ids"`
+	}
+	if r.Body != nil {
+		reqBody, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		if err == nil && len(reqBody) > 0 {
+			if err := json.Unmarshal(reqBody, &req); err != nil {
+				http.Error(w, "Invalid JSON body: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
+	}
+
+	ids := req.IDs
+	if len(ids) == 0 {
+		ids = allTaskIDs()
+	}
+
+	// Phase 1: cancel every in-memory running task first so their workers
+	// wind down in parallel; otherwise each delete would block serially for
+	// up to 10 seconds on its own worker.
+	var doneChs []chan struct{}
+	for _, id := range ids {
+		mu.Lock()
+		t, ok := tasks[id]
+		if ok && t.Status == "running" {
+			t.Status = "deleted"
+			t.StatusReason = "deleted"
+			if t.Cancel != nil {
+				t.Cancel()
+			}
+			if t.DoneCh != nil {
+				doneChs = append(doneChs, t.DoneCh)
+			}
+		}
+		mu.Unlock()
+	}
+	for _, ch := range doneChs {
+		select {
+		case <-ch:
+		case <-time.After(10 * time.Second):
+		}
+	}
+
+	deleted := 0
+	var failedIDs []string
+	for _, id := range ids {
+		if id == "" || strings.Contains(id, "/") {
+			failedIDs = append(failedIDs, id)
+			continue
+		}
+		deleteTaskByID(id)
+		deleted++
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"deleted": deleted,
+		"failed":  failedIDs,
+	})
+}
+
+// allTaskIDs enumerates every task id known to this instance: state files
+// on disk (history + runtime) plus in-memory tasks.
+func allTaskIDs() []string {
+	seen := make(map[string]struct{})
+	for _, dir := range []string{historyStatesDir, runtimeStatesDir} {
+		files, _ := filepath.Glob(filepath.Join(dir, "*.state.json"))
+		for _, f := range files {
+			// State files are named "<taskID><ext>.state.json".
+			name := strings.TrimSuffix(filepath.Base(f), ".state.json")
+			name = strings.TrimSuffix(name, ".epub")
+			name = strings.TrimSuffix(name, ".txt")
+			if name != "" {
+				seen[name] = struct{}{}
+			}
+		}
+	}
+	mu.Lock()
+	for id := range tasks {
+		seen[id] = struct{}{}
+	}
+	mu.Unlock()
+	ids := make([]string, 0, len(seen))
+	for id := range seen {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func handleTasksList(w http.ResponseWriter, r *http.Request) {
 	files, _ := filepath.Glob(filepath.Join(historyStatesDir, "*.state.json"))
 	type taskSummary struct {
 		ID              string                     `json:"id"`
@@ -923,18 +1302,18 @@ func handleTaskGetByID(w http.ResponseWriter, r *http.Request, taskID string) {
 		etaSec := computeEtaSec(task.Current, task.Total, elapsedSec)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"id":                task.ID,
-			"status":            task.Status,
-			"total":             task.Total,
-			"current":           task.Current,
-			"input_path":        task.InputPath,
-			"out_path":          task.OutPath,
-			"resume_supported":  task.Status == "error" || task.Status == "disconnected" || task.Status == "interrupted" || task.Status == "paused",
-			"status_reason":     task.StatusReason,
-			"stats":             task.Stats,
-			"src_file_name":     task.SrcFileName,
-			"elapsed_sec":       elapsedSec,
-			"eta_sec":           etaSec,
+			"id":               task.ID,
+			"status":           task.Status,
+			"total":            task.Total,
+			"current":          task.Current,
+			"input_path":       task.InputPath,
+			"out_path":         task.OutPath,
+			"resume_supported": task.Status == "error" || task.Status == "disconnected" || task.Status == "interrupted" || task.Status == "paused",
+			"status_reason":    task.StatusReason,
+			"stats":            task.Stats,
+			"src_file_name":    task.SrcFileName,
+			"elapsed_sec":      elapsedSec,
+			"eta_sec":          etaSec,
 		})
 		return
 	}
@@ -958,22 +1337,30 @@ func handleTaskGetByID(w http.ResponseWriter, r *http.Request, taskID string) {
 	etaSec := computeEtaSec(state.Current, state.Total, elapsedSec)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"id":                state.ID,
-		"status":            status,
-		"total":             state.Total,
-		"current":           state.Current,
-		"input_path":        state.InputPath,
-		"out_path":          state.OutPath,
-		"resume_supported":  resumeSupported,
-		"status_reason":     reason,
-		"stats":             state.Stats,
-		"src_file_name":     state.SrcFileName,
-		"elapsed_sec":       elapsedSec,
-		"eta_sec":           etaSec,
+		"id":               state.ID,
+		"status":           status,
+		"total":            state.Total,
+		"current":          state.Current,
+		"input_path":       state.InputPath,
+		"out_path":         state.OutPath,
+		"resume_supported": resumeSupported,
+		"status_reason":    reason,
+		"stats":            state.Stats,
+		"src_file_name":    state.SrcFileName,
+		"elapsed_sec":      elapsedSec,
+		"eta_sec":          etaSec,
 	})
 }
 
 func handleTaskDeleteByID(w http.ResponseWriter, r *http.Request, taskID string) {
+	deleteTaskByID(taskID)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"task_id": taskID, "status": "deleted"})
+}
+
+// deleteTaskByID removes a task from memory, cancels it when running, and
+// deletes every associated file (upload, output, state files).
+func deleteTaskByID(taskID string) {
 	var inputPath string
 	var outPath string
 	var doneCh chan struct{}
@@ -1024,9 +1411,6 @@ func handleTaskDeleteByID(w http.ResponseWriter, r *http.Request, taskID string)
 	mu.Lock()
 	delete(tasks, taskID)
 	mu.Unlock()
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"task_id": taskID, "status": "deleted"})
 }
 
 func deleteTaskFiles(taskID, inputPath, outPath string) {
@@ -1058,49 +1442,170 @@ func deleteTaskFiles(taskID, inputPath, outPath string) {
 	}
 }
 
+// modelEntry is one locally available model together with the engine that
+// serves it ("omlx"/"mlx"/"ollama") and its recommended chapter batch size.
+type modelEntry struct {
+	Name      string `json:"name"`
+	Engine    string `json:"engine"`
+	ChunkSize int    `json:"chunk_size"`
+}
+
+// Default local engine endpoints probed in auto-detect mode.
+var defaultEngineEndpoints = []string{
+	"http://127.0.0.1:8000",  // oMLX (managed MLX server, API-key auth)
+	"http://127.0.0.1:8080",  // mlx_lm.server (OpenAI-compatible)
+	"http://127.0.0.1:11434", // Ollama
+}
+
 func handleModels(w http.ResponseWriter, r *http.Request) {
 	apiURL := r.URL.Query().Get("api_url")
-	if apiURL == "" {
-		apiURL = "http://localhost:11434/v1/chat/completions"
-	}
-
-	baseURL := strings.Split(apiURL, "/v1/")[0]
-	if !strings.Contains(apiURL, "/v1/") || baseURL == "" {
-		baseURL = "http://localhost:11434"
-	}
-	tagsURL := baseURL + "/api/tags"
-
 	client := &http.Client{Timeout: 3 * time.Second}
-	resp, err := client.Get(tagsURL)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		http.Error(w, fmt.Sprintf("Failed: %d", resp.StatusCode), http.StatusInternalServerError)
-		return
+	models := []modelEntry{}
+	if apiURL != "" {
+		models = probeModelsAtURL(client, apiURL)
+	} else {
+		// Auto-detect: probe the standard local endpoints of every supported
+		// engine and merge whatever answers.
+		for _, endpoint := range defaultEngineEndpoints {
+			models = append(models, probeModelsAtURL(client, endpoint)...)
+		}
 	}
 
+	detectedEngine := ""
+	if len(models) > 0 {
+		detectedEngine = models[0].Engine
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"models":          models,
+		"detected_engine": detectedEngine,
+	})
+}
+
+// probeModelsAtURL lists the models served by one base URL. It tries the
+// OpenAI-compatible /v1/models endpoint first (oMLX, mlx_lm.server, LM Studio
+// and modern Ollama all speak it), then falls back to Ollama's native
+// /api/tags. Endpoints that answer 401 are retried once with the local oMLX
+// API key from ~/.omlx/settings.json.
+func probeModelsAtURL(client *http.Client, apiURL string) []modelEntry {
+	baseURL := "http://127.0.0.1:8000"
+	if !strings.HasPrefix(apiURL, "http://") && !strings.HasPrefix(apiURL, "https://") {
+		apiURL = "http://" + apiURL
+	}
+	if parsed, err := url.Parse(apiURL); err == nil && parsed.Host != "" {
+		baseURL = parsed.Scheme + "://" + parsed.Host
+	}
+
+	if names := fetchModelList(client, baseURL+"/v1/models", config.ReadOMLXAPIKey(), decodeOpenAIModels); len(names) > 0 {
+		return tagModelNames(names, engineForBaseURL(baseURL))
+	}
+	if names := fetchModelList(client, baseURL+"/api/tags", "", decodeOllamaModels); len(names) > 0 {
+		return tagModelNames(names, config.EngineOllama)
+	}
+	return nil
+}
+
+// engineForBaseURL labels probed models with the engine that serves them,
+// keyed on the well-known local ports.
+func engineForBaseURL(baseURL string) string {
+	u := strings.ToLower(baseURL)
+	switch {
+	case strings.Contains(u, ":11434"):
+		return config.EngineOllama
+	case strings.Contains(u, ":8000"):
+		return config.EngineOmlx
+	case strings.Contains(u, ":8080"):
+		return config.EngineMLX
+	}
+	// Custom OpenAI-compatible server.
+	return config.EngineMLX
+}
+
+func tagModelNames(names []string, engine string) []modelEntry {
+	entries := make([]modelEntry, 0, len(names))
+	for _, n := range names {
+		entries = append(entries, modelEntry{
+			Name:      n,
+			Engine:    engine,
+			ChunkSize: config.AutoCalculateMaxChunkSize(n),
+		})
+	}
+	return entries
+}
+
+func decodeOpenAIModels(body []byte) ([]string, error) {
+	var result struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(result.Data))
+	for _, m := range result.Data {
+		if strings.TrimSpace(m.ID) != "" {
+			names = append(names, m.ID)
+		}
+	}
+	return names, nil
+}
+
+func decodeOllamaModels(body []byte) ([]string, error) {
 	var result struct {
 		Models []struct {
 			Name string `json:"name"`
 		} `json:"models"`
 	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
 	}
-
-	models := make([]string, 0, len(result.Models))
+	names := make([]string, 0, len(result.Models))
 	for _, m := range result.Models {
-		models = append(models, m.Name)
+		names = append(names, m.Name)
+	}
+	return names, nil
+}
+
+// fetchModelList GETs a model-list endpoint and decodes the names. When the
+// server answers 401 and an apiKey is available, the request is retried once
+// with the bearer token.
+func fetchModelList(client *http.Client, listURL, apiKey string, decode func([]byte) ([]string, error)) []string {
+	do := func(key string) (int, []byte, error) {
+		req, err := http.NewRequest("GET", listURL, nil)
+		if err != nil {
+			return 0, nil, err
+		}
+		if key != "" {
+			req.Header.Set("Authorization", "Bearer "+key)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return 0, nil, err
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		return resp.StatusCode, body, err
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{"models": models})
+	status, body, err := do("")
+	if err != nil || status != http.StatusOK {
+		if status != http.StatusUnauthorized || apiKey == "" {
+			return nil
+		}
+		status, body, err = do(apiKey)
+		if err != nil || status != http.StatusOK {
+			return nil
+		}
+	}
+	names, err := decode(body)
+	if err != nil {
+		return nil
+	}
+	sort.Strings(names)
+	return names
 }
 
 func handleRoles(w http.ResponseWriter, r *http.Request) {
@@ -1182,13 +1687,21 @@ func runTranslationTask(t *TranslationTask) {
 		t.DoneCh = make(chan struct{})
 	}
 	defer close(t.DoneCh)
+	// Re-check the status under the global lock: a delete/pause may have
+	// landed between the worker's pickup and this point.
+	mu.Lock()
+	if t.Status == "deleted" || t.Status == "paused" {
+		mu.Unlock()
+		return
+	}
+	t.Status = "running"
+	t.StatusReason = ""
+	mu.Unlock()
 	startTime := time.Now()
 	if t.StartedAt.IsZero() {
 		t.StartedAt = startTime
 	}
 	t.LastResumeAt = startTime
-	t.Status = "running"
-	t.StatusReason = ""
 	t.InstanceID = instanceID
 	t.LastHeartbeat = time.Now()
 	if t.Cancel != nil {
@@ -1230,6 +1743,10 @@ func runTranslationTask(t *TranslationTask) {
 
 	fail := func(err error) {
 		accumulateElapsed(t, time.Now())
+		if t.Status == "deleted" {
+			// Task was deleted mid-flight; do not resurrect any state.
+			return
+		}
 		t.Status = "error"
 		t.StatusReason = "fatal_error"
 		t.Error = err.Error()
@@ -1277,7 +1794,8 @@ func runTranslationTask(t *TranslationTask) {
 	tr := translator.New(t.Config)
 	proc := processor.New(t.Config, tr)
 
-	sendLog(fmt.Sprintf("引擎已并发启动 (Concurrency = %d). 请耐心等待...", t.Config.Concurrency), "gray")
+	engineName := config.EngineLabel(t.Config.Engine)
+	sendLog(fmt.Sprintf("引擎已启动 (%s, 并发 = %d)。章节上下文批处理模式：同一章节的段落合并为批次翻译，并携带章节标题与前文滚动上下文。", engineName, t.Config.Concurrency), "gray")
 	saveTaskState(t)
 
 	translatedBlocks, stats, err := proc.Process(t.Ctx, blocks, t.CompletedChunks, func(current, total int, msg string) {
@@ -1317,9 +1835,24 @@ func runTranslationTask(t *TranslationTask) {
 	})
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
+			mu.Lock()
+			stopExport := t.StopExportRequested
+			deletedMidFlight := t.Status == "deleted"
+			mu.Unlock()
+			if stopExport && !deletedMidFlight {
+				translatedCount, total, aerr := buildPartialOutput(t, p, blocks)
+				if aerr != nil {
+					fail(aerr)
+					return
+				}
+				finishPartialExport(t, translatedCount, total)
+				return
+			}
 			accumulateElapsed(t, time.Now())
-			t.Status = "paused"
-			t.StatusReason = "paused_by_user"
+			if t.Status != "deleted" {
+				t.Status = "paused"
+				t.StatusReason = "paused_by_user"
+			}
 			saveTaskState(t)
 			elapsedSec := currentElapsedSec(t, time.Now())
 			etaSec := computeEtaSec(t.Current, t.Total, elapsedSec)
@@ -1338,6 +1871,13 @@ func runTranslationTask(t *TranslationTask) {
 
 	t.Current = t.Total // Hack to show 100% since we executed in batch mode internally
 	sendLog("所有块翻译完毕。汇编构建输出文件...", "gray")
+
+	mu.Lock()
+	deletedMidFlight := t.Status == "deleted"
+	mu.Unlock()
+	if deletedMidFlight {
+		return
+	}
 
 	err = p.Assemble(translatedBlocks, t.Config.OutputFile, t.Config.Bilingual)
 	if err != nil {

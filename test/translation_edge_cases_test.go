@@ -105,11 +105,17 @@ func TestChunkAggregation_TxtShortTexts(t *testing.T) {
 			}
 		}
 
+		// Echo each paragraph back with a prefix, preserving paragraph breaks.
+		paras := strings.Split(content, "\n\n")
+		for i := range paras {
+			paras[i] = "Translated: " + paras[i]
+		}
+
 		respMap := map[string]interface{}{
 			"choices": []map[string]interface{}{
 				{
 					"message": map[string]string{
-						"content": "Translated: " + content,
+						"content": strings.Join(paras, "\n\n"),
 					},
 				},
 			},
@@ -140,26 +146,22 @@ func TestChunkAggregation_TxtShortTexts(t *testing.T) {
 		t.Fatalf("Process error: %v", err)
 	}
 
-	// and node_2 to have a special skip token or be handled such that it doesn't cause issues.
-	// We'll check the Output blocks.
 	transMap := make(map[string]string)
 	for _, b := range translatedBlocks {
 		t.Logf("Result ID: %s, Text: %q", b.ID, b.TranslatedText)
 		transMap[b.ID] = b.TranslatedText
 	}
 
-	expectedMergedText := "Translated: Chapter 1 Introduction This is a long sentence that should not be merged because it's long enough. It actually has some meat to it."
-	if transMap["txt_0"] != expectedMergedText {
-		t.Errorf("Expected txt_0 to merge txt_1 and txt_2 and translate together, got: %s", transMap["txt_0"])
+	// Chapter batching: all three paragraphs share one request; the paragraph
+	// structure is preserved and each block gets its own translated paragraph.
+	if transMap["txt_0"] != "Translated: Chapter 1" {
+		t.Errorf("Expected txt_0 to get its own paragraph back, got: %s", transMap["txt_0"])
 	}
-
-	node2Text := transMap["txt_1"]
-	if node2Text != "<!--merged-->" {
-		t.Errorf("Expected txt_1 to be merged and thus replaced with an HTML comment, got: %q", node2Text)
+	if transMap["txt_1"] != "Translated: Introduction" {
+		t.Errorf("Expected txt_1 to get its own paragraph back, got: %q", transMap["txt_1"])
 	}
-	node3Text := transMap["txt_2"]
-	if node3Text != "<!--merged-->" {
-		t.Errorf("Expected txt_2 to be merged and thus replaced with an HTML comment, got: %q", node3Text)
+	if transMap["txt_2"] != "Translated: This is a long sentence that should not be merged because it's long enough. It actually has some meat to it." {
+		t.Errorf("Expected txt_2 to get its own paragraph back, got: %q", transMap["txt_2"])
 	}
 }
 
@@ -178,11 +180,15 @@ func TestChunkAggregation_EpubNoMerge(t *testing.T) {
 				content = m.Content
 			}
 		}
+		paras := strings.Split(content, "\n\n")
+		for i := range paras {
+			paras[i] = "Translated: " + paras[i]
+		}
 		respMap := map[string]interface{}{
 			"choices": []map[string]interface{}{
 				{
 					"message": map[string]string{
-						"content": "Translated: " + content,
+						"content": strings.Join(paras, "\n\n"),
 					},
 				},
 			},
@@ -303,11 +309,15 @@ func TestChunkAggregation_EpubBlockIsolation(t *testing.T) {
 				content = m.Content
 			}
 		}
+		paras := strings.Split(content, "\n\n")
+		for i := range paras {
+			paras[i] = "Translated: " + paras[i]
+		}
 		respMap := map[string]interface{}{
 			"choices": []map[string]interface{}{
 				{
 					"message": map[string]string{
-						"content": "Translated: " + content,
+						"content": strings.Join(paras, "\n\n"),
 					},
 				},
 			},

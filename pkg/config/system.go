@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -233,12 +234,67 @@ func tryRestartOllama(concurrency int) error {
 	return fmt.Errorf("unsupported os for auto-restart")
 }
 
-// AutoCalculateConcurrency calculates safe concurrency limit based on RAM and model size.
-// Returns a filled SystemInfo or falls back to Concurrency=1 gracefully.
-func AutoCalculateConcurrency(apiURL, modelName string) (*SystemInfo, error) {
+// estimateModelSizeGBFromName guesses a model's memory footprint from its
+// name (e.g. "mlx-community/Qwen2.5-32B-Instruct-4bit" -> ~20GB). Used when
+// the backend exposes no size API (MLX / OpenAI-compatible servers).
+func estimateModelSizeGBFromName(modelName string) uint64 {
+	name := strings.ToLower(modelName)
+	re := regexp.MustCompile(`(\d+(?:\.\d+)?)\s*b`)
+	match := re.FindStringSubmatch(name)
+	if match == nil {
+		return 4 // unknown size: assume a small model
+	}
+	params, err := strconv.ParseFloat(match[1], 64)
+	if err != nil || params <= 0 {
+		return 4
+	}
+	bytesPerParam := 2.0 // fp16 default
+	switch {
+	case strings.Contains(name, "4bit"):
+		bytesPerParam = 0.6
+	case strings.Contains(name, "8bit"):
+		bytesPerParam = 1.05
+	case strings.Contains(name, "6bit"):
+		bytesPerParam = 0.8
+	case strings.Contains(name, "5bit"):
+		bytesPerParam = 0.7
+	case strings.Contains(name, "3bit"):
+		bytesPerParam = 0.45
+	}
+	gb := params * bytesPerParam
+	if gb < 1 {
+		gb = 1
+	}
+	return uint64(gb * 1024 * 1024 * 1024)
+}
+
+// AutoCalculateConcurrency calculates a safe concurrency limit based on RAM
+// and the model size. For Ollama it queries the tags API and may restart
+// Ollama with a higher OLLAMA_NUM_PARALLEL; for MLX it estimates the model
+// size from the name and never touches any server.
+func AutoCalculateConcurrency(apiURL, modelName, engine string) (*SystemInfo, error) {
 	ram, err := getSystemRAMBytes()
 	if err != nil {
 		return &SystemInfo{RecommendedC: 1}, fmt.Errorf("failed to get system RAM: %v", err)
+	}
+
+	if engine != EngineOllama {
+		modSize := estimateModelSizeGBFromName(modelName)
+		recommended := autoCalculateLogic(ram, modSize, runtime.GOOS)
+		cpuCap := maxConcurrencyByCPU()
+		if recommended > cpuCap {
+			recommended = cpuCap
+		}
+		modelCap := maxConcurrencyByModel(modelName)
+		if recommended > modelCap {
+			recommended = modelCap
+		}
+		return &SystemInfo{
+			TotalRAMBytes: ram,
+			ModelSize:     modSize,
+			RecommendedC:  recommended,
+			WarningMsg:    "",
+		}, nil
 	}
 
 	modSize, err := getModelSizeBytes(apiURL, modelName)

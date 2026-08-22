@@ -35,7 +35,16 @@ func startServer(t *testing.T) *TestServer {
 		}
 	}
 
-	cmd := exec.Command("go", "run", "cmd/webrunner/main.go")
+	// Build once and run the binary directly: `go run` spawns a child process
+	// that Process.Kill would NOT take down, leaking orphan servers that keep
+	// processing queued tasks against real local ports.
+	serverBin := filepath.Join(binDir, "webrunner_test_bin")
+	buildCmd := exec.Command("go", "build", "-o", serverBin, "./cmd/webrunner")
+	buildCmd.Dir = workDir
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("build webrunner: %v\n%s", err, out)
+	}
+	cmd := exec.Command(serverBin)
 	cmd.Dir = workDir
 	cmd.Env = env
 	stdout, err := cmd.StdoutPipe()

@@ -34,12 +34,13 @@ func TestConfig_ConcurrencyCappedByCPUCoresMinusOne(t *testing.T) {
 
 func TestConfig_ConcurrencyCappedByModelStabilityProfile(t *testing.T) {
 	cfg := &config.Config{
-		Model:       "qwen3.5:4b",
+		Model:       "qwen2.5:70b",
 		Concurrency: 999,
 	}
 	cfg.AutoDetectAndCalculate()
-	if cfg.Concurrency != 3 {
-		t.Fatalf("expected qwen model capped to 3, got %d", cfg.Concurrency)
+	// Giant models are pinned to 1 regardless of hardware.
+	if cfg.Concurrency != 1 {
+		t.Fatalf("expected 70b model capped to 1, got %d", cfg.Concurrency)
 	}
 }
 

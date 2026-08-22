@@ -35,8 +35,8 @@ func TestConfigLoad(t *testing.T) {
 	if cfg.MaxRetries != 5 {
 		t.Errorf("Expected default max_retries 5, got %d", cfg.MaxRetries)
 	}
-	if cfg.RequestTimeoutSec != 180 {
-		t.Errorf("Expected default request_timeout_sec 180, got %d", cfg.RequestTimeoutSec)
+	if cfg.RequestTimeoutSec != 300 {
+		t.Errorf("Expected default request_timeout_sec 300, got %d", cfg.RequestTimeoutSec)
 	}
 	if cfg.Bilingual != true {
 		t.Errorf("Expected bilingual true, got false")

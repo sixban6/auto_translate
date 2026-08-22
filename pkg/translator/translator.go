@@ -8,9 +8,11 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"auto_translate/pkg/config"
 )
@@ -25,7 +27,28 @@ const (
 	StatusSkip     TranslationStatus = "skip"
 )
 
-// Translator handles HTTP requests to the Ollama API and glossary enforcement.
+// Engine identifiers re-exported for callers of this package.
+const (
+	EngineOllama = config.EngineOllama
+	EngineMLX    = config.EngineMLX
+	EngineOmlx   = config.EngineOmlx
+)
+
+// TranslateRequest carries one translation batch plus chapter context.
+type TranslateRequest struct {
+	// Text is the raw content to translate. When ParagraphCount > 1 the
+	// paragraphs are joined with blank lines and the model is instructed to
+	// keep the same paragraph structure.
+	Text           string
+	ParagraphCount int
+	// ChapterTitle is the current chapter heading, used as context only.
+	ChapterTitle string
+	// PrevTail is the tail of the previous batch's translation in the same
+	// chapter, used as rolling context only.
+	PrevTail string
+}
+
+// Translator handles HTTP requests to the LLM backend and glossary enforcement.
 type Translator struct {
 	cfg    *config.Config
 	client *http.Client
@@ -33,6 +56,25 @@ type Translator struct {
 
 var latinDoubleDashPattern = regexp.MustCompile(`([A-Za-z])[—–-]{2,}([A-Za-z])`)
 var rePrefixBeforeHanPattern = regexp.MustCompile(`(?i)\bre\s*[—–-]?\s*([\p{Han}])`)
+
+// reThinkingBlock matches a complete thinking block (Qwen <think>,
+// DeepSeek <thinking>, R1-style <reasoning>).
+var reThinkingBlock = regexp.MustCompile(`(?is)<\s*(?:think|thinking|reasoning)\s*>.*?<\s*/\s*(?:think|thinking|reasoning)\s*>`)
+
+// reUnterminatedThink matches an opening tag with no closing partner:
+// the model ran out of tokens inside its thinking, so everything after it
+// is thinking residue rather than a translation.
+var reUnterminatedThink = regexp.MustCompile(`(?s)^\s*<\s*(?:think|thinking|reasoning)\s*>.*`)
+
+// StripThinkingBlocks removes model thinking blocks from a response. A
+// leading unterminated block swallows the whole string (the model never got
+// to the translation); complete blocks are removed wherever they appear.
+func StripThinkingBlocks(s string) string {
+	s = reThinkingBlock.ReplaceAllString(s, "")
+	s = reUnterminatedThink.ReplaceAllString(s, "")
+	return strings.TrimSpace(s)
+}
+
 var hanReHanPattern = regexp.MustCompile(`([\p{Han}])\s*(?i:re)\s*[—–-]?\s*([\p{Han}])`)
 
 // New creates a new Translator instance.
@@ -45,10 +87,43 @@ func New(cfg *config.Config) *Translator {
 	}
 }
 
-// Translate attempts to translate a given text snippet via the API.
-// Implements retries and handles glossary mapping.
+func (t *Translator) engine() string {
+	return config.ResolveEngine(t.cfg.APIURL, t.cfg.Model, t.cfg.Engine)
+}
+
+// apiKey returns the bearer token for engines that require one. For oMLX the
+// key is read from ~/.omlx/settings.json when not configured explicitly, but
+// the auto-read key is only attached to local addresses so it never leaks to
+// a custom remote endpoint.
+func (t *Translator) apiKey() string {
+	if key := strings.TrimSpace(t.cfg.APIKey); key != "" {
+		return key
+	}
+	if t.engine() == config.EngineOmlx && isLocalHostURL(t.cfg.APIURL) {
+		return config.ReadOMLXAPIKey()
+	}
+	return ""
+}
+
+func isLocalHostURL(u string) bool {
+	l := strings.ToLower(u)
+	return l == "" ||
+		strings.Contains(l, "127.0.0.1") ||
+		strings.Contains(l, "localhost") ||
+		strings.Contains(l, "[::1]")
+}
+
+// Translate translates a single piece of text without chapter context.
+// Retained as a thin wrapper for compatibility.
 func (t *Translator) Translate(ctx context.Context, text string, onEvent ...func(string)) (string, TranslationStatus, error) {
-	if strings.TrimSpace(text) == "" {
+	return t.TranslateBatch(ctx, TranslateRequest{Text: text, ParagraphCount: 1}, onEvent...)
+}
+
+// TranslateBatch translates a batch (one or more paragraphs) with optional
+// chapter context. Implements retries and glossary enforcement via prompt.
+func (t *Translator) TranslateBatch(ctx context.Context, req TranslateRequest, onEvent ...func(string)) (string, TranslationStatus, error) {
+	text := strings.TrimSpace(req.Text)
+	if text == "" {
 		return "", StatusSkip, nil // skip empty chunks
 	}
 	if shouldBypassTranslation(text) {
@@ -60,47 +135,26 @@ func (t *Translator) Translate(ctx context.Context, text string, onEvent ...func
 		ev = onEvent[0]
 	}
 
-	// 0. Short Text / Glossary Fallback Strategy
-	textTrimmed := strings.TrimSpace(text)
-	runes := []rune(textTrimmed)
-	if len(runes) < 20 {
-		// Priority 1: Check Glossary for exact match
-		for en, cn := range t.cfg.Glossary {
-			if strings.EqualFold(textTrimmed, strings.TrimSpace(en)) {
-				return cn, StatusFallback, nil
+	// 0. Short Text / Glossary Fallback Strategy (single paragraph only)
+	if req.ParagraphCount <= 1 {
+		runes := []rune(text)
+		if len(runes) < 20 {
+			// Priority 1: Check Glossary for exact match
+			for en, cn := range t.cfg.Glossary {
+				if strings.EqualFold(text, strings.TrimSpace(en)) {
+					return cn, StatusFallback, nil
+				}
 			}
-		}
-		// Priority 2: If extremely short and no spaces, return as-is
-		if len(runes) < 5 && !strings.Contains(textTrimmed, " ") {
-			if !isASCIILowerWord(textTrimmed) {
-				return text, StatusFallback, nil
+			// Priority 2: If extremely short and no spaces, return as-is
+			if len(runes) < 5 && !strings.Contains(text, " ") {
+				if !isASCIILowerWord(text) {
+					return text, StatusFallback, nil
+				}
 			}
 		}
 	}
 
-	requestURL := t.cfg.APIURL
-	payload := map[string]interface{}{
-		"model":       t.cfg.Model,
-		"temperature": t.cfg.Temperature,
-		"messages": []map[string]string{
-			{"role": "system", "content": t.cfg.Prompt},
-			{"role": "user", "content": text},
-		},
-		"stream": false,
-	}
-	if !strings.Contains(strings.ToLower(t.cfg.Model), "translategemma") {
-		requestURL = toOllamaChatURL(t.cfg.APIURL)
-		payload = map[string]interface{}{
-			"model": t.cfg.Model,
-			"messages": []map[string]string{
-				{"role": "system", "content": t.cfg.Prompt},
-				{"role": "user", "content": text},
-			},
-			"stream":  false,
-			"think":   false,
-			"options": map[string]interface{}{"temperature": t.cfg.Temperature},
-		}
-	}
+	requestURL, payload := t.buildRequest(req)
 
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
@@ -117,11 +171,14 @@ func (t *Translator) Translate(ctx context.Context, text string, onEvent ...func
 		if ctx == nil {
 			ctx = context.Background()
 		}
-		req, err := http.NewRequestWithContext(ctx, "POST", requestURL, bytes.NewBuffer(jsonData))
+		reqHTTP, err := http.NewRequestWithContext(ctx, "POST", requestURL, bytes.NewBuffer(jsonData))
 		if err != nil {
 			return "", StatusFailed, fmt.Errorf("failed to create request: %w", err)
 		}
-		req.Header.Set("Content-Type", "application/json")
+		reqHTTP.Header.Set("Content-Type", "application/json")
+		if key := t.apiKey(); key != "" {
+			reqHTTP.Header.Set("Authorization", "Bearer "+key)
+		}
 
 		// Heartbeat to prevent silent hanging feeling
 		doneCh := make(chan struct{})
@@ -142,29 +199,40 @@ func (t *Translator) Translate(ctx context.Context, text string, onEvent ...func
 			}
 		}(attempt)
 
-		resp, err := t.client.Do(req)
+		resp, err := t.client.Do(reqHTTP)
 		close(doneCh)
 
 		if err != nil {
+			if ctx.Err() != nil {
+				// Cancelled/paused: abort instead of burning retry backoff.
+				return "", StatusFailed, fmt.Errorf("API request cancelled: %w", ctx.Err())
+			}
 			if attempt == maxRetries {
 				return "", StatusFailed, fmt.Errorf("API request failed after %d attempts: %w", maxRetries, err)
 			}
 			if ev != nil {
 				ev(fmt.Sprintf("API request failed (Attempt %d/%d): %v. Retrying...", attempt, maxRetries, err))
 			}
-			time.Sleep(time.Duration(attempt*8) * time.Second)
+			if !sleepCtx(ctx, attempt) {
+				return "", StatusFailed, fmt.Errorf("API request cancelled during retry: %w", ctx.Err())
+			}
 			continue
 		}
 
 		if resp.StatusCode != http.StatusOK {
 			resp.Body.Close()
+			if ctx.Err() != nil {
+				return "", StatusFailed, fmt.Errorf("API request cancelled: %w", ctx.Err())
+			}
 			if attempt == maxRetries {
 				return "", StatusFailed, fmt.Errorf("API returned non-200 status %d after %d attempts", resp.StatusCode, maxRetries)
 			}
 			if ev != nil {
 				ev(fmt.Sprintf("API returned status %d (Attempt %d/%d). Retrying...", resp.StatusCode, attempt, maxRetries))
 			}
-			time.Sleep(time.Duration(attempt*8) * time.Second)
+			if !sleepCtx(ctx, attempt) {
+				return "", StatusFailed, fmt.Errorf("API request cancelled during retry: %w", ctx.Err())
+			}
 			continue
 		}
 
@@ -174,7 +242,8 @@ func (t *Translator) Translate(ctx context.Context, text string, onEvent ...func
 			return "", StatusFailed, fmt.Errorf("failed to read API response body: %w", err)
 		}
 
-		// Parse response
+		// Parse response. Both OpenAI-style ("choices") and Ollama-style
+		// ("message") payloads are accepted.
 		var result struct {
 			Choices []struct {
 				Message struct {
@@ -198,12 +267,22 @@ func (t *Translator) Translate(ctx context.Context, text string, onEvent ...func
 			return "", StatusFailed, fmt.Errorf("API returned empty choices/message")
 		}
 
+		// Defensive: strip thinking blocks some servers prepend to content
+		// even when thinking was requested off.
+		translated = StripThinkingBlocks(translated)
+
 		if strings.Contains(translated, "请提供需要翻译的文本") ||
 			strings.Contains(translated, "无法翻译") ||
 			strings.Contains(translated, "未提供上下文") ||
 			strings.Contains(translated, "没有任何内容") ||
 			strings.Contains(translated, "请提供包含") {
 			return text, StatusRefused, fmt.Errorf("model refused to translate (fallback to original): %s", translated)
+		}
+
+		// Echo detection: small models sometimes return the source text verbatim
+		// instead of translating. Surface it as a fallback so the stats show it.
+		if strings.TrimSpace(translated) == strings.TrimSpace(text) && strings.TrimSpace(text) != "" {
+			return text, StatusFallback, nil
 		}
 		break
 	}
@@ -227,31 +306,119 @@ func (t *Translator) Translate(ctx context.Context, text string, onEvent ...func
 	translated = latinDoubleDashPattern.ReplaceAllString(translated, "$1-$2")
 	translated = hanReHanPattern.ReplaceAllString(translated, "$1$2")
 	translated = rePrefixBeforeHanPattern.ReplaceAllString(translated, "$1")
+	translated = stripContextMarkerLeaks(translated, req)
 
-	// 2. Glossary Enforcement
-	for en, cn := range t.cfg.Glossary {
-		// Only replace if the source text actually contains the term (case-insensitive check)
-		if strings.Contains(strings.ToLower(text), strings.ToLower(en)) {
-			translated = strings.ReplaceAll(translated, cn, cn) // This is a no-op fallback
-
-			// If we want forceful exact matching across variations, we'd need smart regex,
-			// but for now, we trust the model mostly got it right, and we just ensure
-			// if the model generated a similar but slightly wrong Chinese term, we don't
-			// easily overwrite.
-			// Actually, the most naive (but effective) glossary enforcement for OLLAMA is:
-			// If the term was in the prompt, Ollie usually follows it. If not, and we have
-			// a glossary, we could do regex replaces on expected wrong translations, but
-			// we don't know the wrong translations.
-			// So, the prompt is our primary defense. We will leave this simple.
-			// Currently, just printing missing terms is helpful for debugging.
-			if !strings.Contains(translated, cn) {
-				// We COULD force append or substitute, but it often breaks grammar.
-				// We rely on the System Prompt to enforce it.
-			}
-		}
+	// Same-language paraphrase detection: a Chinese-output role given
+	// non-Han source must produce Han text. An English rewrite of English
+	// text means the model failed to translate — surface it as a fallback
+	// so the processor's retry pass can take over.
+	if TargetsChinese(t.cfg.Prompt) && !ContainsHan(text) &&
+		utf8.RuneCountInString(text) >= 10 && !ContainsHan(translated) {
+		return text, StatusFallback, nil
 	}
 
 	return translated, StatusSuccess, nil
+}
+
+// buildRequest assembles the request URL and JSON payload for the active engine.
+func (t *Translator) buildRequest(req TranslateRequest) (string, map[string]interface{}) {
+	messages := []map[string]string{
+		{"role": "system", "content": t.buildSystemPrompt(req)},
+		{"role": "user", "content": req.Text},
+	}
+	if t.engine() == EngineOllama {
+		return toOllamaChatURL(t.cfg.APIURL), map[string]interface{}{
+			"model":    t.cfg.Model,
+			"messages": messages,
+			"stream":   false,
+			"think":    false,
+			"options": map[string]interface{}{
+				"temperature": t.cfg.Temperature,
+				"num_ctx":     8192,
+			},
+		}
+	}
+	return t.openAIChatURL(), map[string]interface{}{
+		"model":       t.cfg.Model,
+		"messages":    messages,
+		"temperature": t.cfg.Temperature,
+		"stream":      false,
+		"max_tokens":  batchMaxTokens(req.Text),
+		// Qwen3-style hybrid models default to thinking ON in their chat
+		// template; for translation that only burns tokens and latency.
+		// Standard OpenAI-compat switch (MLX-LM, vLLM, ...); servers that
+		// do not know the field ignore it.
+		"chat_template_kwargs": map[string]interface{}{
+			"enable_thinking": false,
+		},
+	}
+}
+
+// buildSystemPrompt combines the role prompt with glossary, paragraph-format
+// and chapter-context instructions.
+func (t *Translator) buildSystemPrompt(req TranslateRequest) string {
+	var sb strings.Builder
+	sb.WriteString(strings.TrimSpace(t.cfg.Prompt))
+
+	if len(t.cfg.Glossary) > 0 {
+		terms := make([]string, 0, len(t.cfg.Glossary))
+		for en := range t.cfg.Glossary {
+			terms = append(terms, en)
+		}
+		sort.Strings(terms)
+		if len(terms) > 200 {
+			terms = terms[:200]
+		}
+		sb.WriteString("\n\n[术语表·必须严格遵守] ")
+		for i, en := range terms {
+			if i > 0 {
+				sb.WriteString("; ")
+			}
+			sb.WriteString(en + "=" + t.cfg.Glossary[en])
+		}
+		sb.WriteString("。")
+	}
+
+	if req.ParagraphCount > 1 {
+		sb.WriteString(fmt.Sprintf("\n\n[格式要求] 输入由 %d 个段落组成，段落之间以空行分隔。译文必须一一对应地输出相同数量的段落，段落之间同样用一个空行分隔；禁止合并、拆分、增删段落。", req.ParagraphCount))
+	}
+
+	if req.ChapterTitle != "" {
+		sb.WriteString("\n\n[当前章节] " + req.ChapterTitle + "（仅供理解上下文，不要翻译或输出此行）")
+	}
+	if req.PrevTail != "" {
+		sb.WriteString("\n\n[前文译文结尾·仅供参考，禁止翻译或输出] " + req.PrevTail)
+	}
+	return sb.String()
+}
+
+// batchMaxTokens gives the model enough room to translate the batch without
+// hitting a small server-side default.
+func batchMaxTokens(text string) int {
+	runes := utf8.RuneCountInString(text)
+	limit := runes * 3
+	if limit < 1024 {
+		limit = 1024
+	}
+	if limit > 8192 {
+		limit = 8192
+	}
+	return limit
+}
+
+// sleepCtx waits for the retry backoff, aborting early when ctx is cancelled.
+// Returns false when the context was cancelled.
+func sleepCtx(ctx context.Context, attempt int) bool {
+	sleepSec := attempt * 3
+	if sleepSec > 15 {
+		sleepSec = 15
+	}
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(time.Duration(sleepSec) * time.Second):
+		return true
+	}
 }
 
 func toOllamaChatURL(apiURL string) string {
@@ -262,6 +429,87 @@ func toOllamaChatURL(apiURL string) string {
 		return strings.Replace(apiURL, "/v1/chat/completions", "/api/chat", 1)
 	}
 	return strings.TrimRight(apiURL, "/") + "/api/chat"
+}
+
+// openAIChatURL resolves the endpoint for MLX/oMLX (OpenAI-compatible)
+// engines. oMLX URLs are commonly given as the base form
+// "http://127.0.0.1:8000/v1" (or a bare host), so the chat completions path
+// is appended for the omlx engine; other engines post to api_url as-is.
+func (t *Translator) openAIChatURL() string {
+	u := strings.TrimSpace(t.cfg.APIURL)
+	if u == "" {
+		return config.DefaultOMLXChatEndpoint
+	}
+	if t.engine() != config.EngineOmlx {
+		return u
+	}
+	if strings.HasSuffix(u, "/chat/completions") {
+		return u
+	}
+	if strings.HasSuffix(u, "/v1") {
+		return u + "/chat/completions"
+	}
+	// Bare host without any path (e.g. http://127.0.0.1:8000).
+	return strings.TrimRight(u, "/") + "/v1/chat/completions"
+}
+
+// BypassesTranslation reports whether the text needs no translation at all
+// (empty, URL-like, filename-like, or containing no letters). The processor
+// uses it to skip pointless retries for such entries.
+func BypassesTranslation(text string) bool {
+	return shouldBypassTranslation(text)
+}
+
+// ContainsHan reports whether s contains at least one Han rune.
+func ContainsHan(s string) bool {
+	for _, r := range s {
+		if unicode.Is(unicode.Han, r) {
+			return true
+		}
+	}
+	return false
+}
+
+// TargetsChinese reports whether the role prompt asks for Chinese output.
+// All bundled expert prompts do; empty or non-Chinese prompts disable the
+// same-language paraphrase detection.
+func TargetsChinese(prompt string) bool {
+	return strings.Contains(prompt, "中文") || strings.Contains(prompt, "汉语")
+}
+
+// stripContextMarkerLeaks removes the "[当前章节]" / "[前文译文结尾…]" context
+// markers that small models sometimes echo into the translation even though
+// the prompt forbids it. Known marker+title pairs are removed exactly first;
+// a leaked marker followed by a short title token is then stripped
+// defensively.
+func stripContextMarkerLeaks(s string, req TranslateRequest) string {
+	if !strings.Contains(s, "[当前章节") && !strings.Contains(s, "[前文译文结尾") {
+		return s
+	}
+	if req.ChapterTitle != "" {
+		s = strings.ReplaceAll(s, "[当前章节] "+req.ChapterTitle, "")
+		s = strings.ReplaceAll(s, "[当前章节]"+req.ChapterTitle, "")
+	}
+	if req.PrevTail != "" {
+		s = strings.ReplaceAll(s, "[前文译文结尾·仅供参考，禁止翻译或输出] "+req.PrevTail, "")
+		s = strings.ReplaceAll(s, "[前文译文结尾·仅供参考，禁止翻译或输出]"+req.PrevTail, "")
+	}
+	// Defensive: drop a leading marker plus one following whitespace-delimited
+	// token (a translated chapter title), keeping the rest of the paragraph.
+	for _, marker := range []string{"[当前章节]", "[前文译文结尾·仅供参考，禁止翻译或输出]"} {
+		trimmed := strings.TrimSpace(s)
+		if !strings.HasPrefix(trimmed, marker) {
+			continue
+		}
+		rest := strings.TrimSpace(trimmed[len(marker):])
+		fields := strings.SplitN(rest, " ", 2)
+		if len(fields) == 2 && utf8.RuneCountInString(fields[0]) <= 30 {
+			s = fields[1]
+		} else {
+			s = rest
+		}
+	}
+	return strings.TrimSpace(s)
 }
 
 func shouldBypassTranslation(text string) bool {

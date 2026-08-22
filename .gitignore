@@ -1,4 +1,7 @@
 # Binaries for programs and plugins
+webrunner
+autotrans
+autotrans-web
 node_modules/
 build
 dist

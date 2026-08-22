@@ -605,6 +605,11 @@ input:checked + .slider:before {
   font-size: 14px;
 }
 
+.data-table input[type="checkbox"] {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
 .empty-state {
   padding: 40px;
   text-align: center;

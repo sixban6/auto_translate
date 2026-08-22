@@ -1,6 +1,7 @@
 {
-  "api_url": "http://localhost:11434/v1/chat/completions",
-  "model": "qwen2.5:32b",
+  "api_url": "http://127.0.0.1:8000/v1",
+  "engine": "omlx",
+  "model": "Qwen3.8-27B-oQ4e-mtp",
   "prompt": "You are a professional financial translator specializing in VSA (Volume Spread Analysis) and Wyckoff Theory.\nTranslate the given text into concise, professional Chinese suitable for senior traders.\nCRITICAL: Output ONLY the translated Chinese text. No markdown, no explanations, no original text.",
   "glossary": {
     "Ventas": "抛压",

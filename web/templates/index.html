@@ -66,15 +66,23 @@
           <div class="form-section">
             <div class="section-title">模型与接口</div>
             <div class="form-group">
-              <label>本地模型 (Ollama)</label>
+              <label>推理引擎</label>
+              <select id="engineSelect" name="engine" class="select-input">
+                <option value="omlx" selected>oMLX (Apple 芯片 · 默认)</option>
+                <option value="mlx">MLX (mlx_lm.server)</option>
+                <option value="ollama">Ollama</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>本地模型</label>
               <select id="modelSelect" class="select-input">
-                <option value="translategemma:12b">加载中...</option>
+                <option value="Qwen3.8-27B-oQ4e-mtp">加载中...</option>
               </select>
               <input
                 type="text"
                 name="model"
                 id="modelInput"
-                value="translategemma:12b"
+                value="Qwen3.8-27B-oQ4e-mtp"
                 class="select-input"
                 style="display: none; margin-top: 8px"
                 placeholder="请输入模型名称"
@@ -86,7 +94,7 @@
               <input
                 type="text"
                 name="api_url"
-                value="http://localhost:11434/v1/chat/completions"
+                value="http://127.0.0.1:8000/v1"
                 required
               />
             </div>
@@ -94,6 +102,21 @@
 
           <div class="form-section">
             <div class="section-title">翻译参数</div>
+            <div class="form-group">
+              <label>章节批次大小 (字符)</label>
+              <select
+                id="chunkSizeSelect"
+                name="max_chunk_size"
+                class="select-input"
+              >
+                <option value="0" selected>自动（跟随模型推荐）</option>
+                <option value="1200">1200 · 保守（小模型更稳）</option>
+                <option value="2400">2400 · 标准</option>
+                <option value="3200">3200 · 大（≥14B 模型推荐）</option>
+                <option value="4800">4800 · 超大</option>
+                <option value="6400">6400 · 特大（重试代价高）</option>
+              </select>
+            </div>
             <div class="form-group">
               <label>翻译专家角色</label>
               <select id="roleSelect" name="prompt_role" class="select-input">
@@ -117,7 +140,7 @@
               <input
                 type="number"
                 name="request_timeout_sec"
-                value="180"
+                value="300"
                 min="5"
               />
             </div>
@@ -279,6 +302,17 @@ Demand=需求</textarea
                 </button>
                 <button
                   class="btn-secondary hidden"
+                  id="stopExportBtn"
+                  style="
+                    color: var(--text-red);
+                    border-color: var(--text-red);
+                    margin-right: 8px;
+                  "
+                >
+                  终止并导出
+                </button>
+                <button
+                  class="btn-secondary hidden"
                   id="pauseBtn"
                   style="margin-right: 8px"
                 >
@@ -332,13 +366,37 @@ Demand=需求</textarea
                 </div>
               </div>
               <div class="modal-body">
+                <div class="flex-between" style="margin-bottom: 12px">
+                  <span id="historySelectionInfo" class="text-sm text-gray"
+                    >已选 0 项</span
+                  >
+                  <div class="flex" style="gap: 8px">
+                    <button
+                      class="btn-secondary btn-sm"
+                      id="batchDeleteBtn"
+                      disabled
+                    >
+                      批量删除 (0)
+                    </button>
+                    <button class="btn-danger btn-sm" id="clearAllTasksBtn">
+                      清空全部
+                    </button>
+                  </div>
+                </div>
                 <table class="data-table">
                   <thead>
                     <tr>
-                      <th style="width: 35%">文件名 / 任务ID</th>
-                      <th style="width: 15%">状态</th>
+                      <th style="width: 4%">
+                        <input
+                          type="checkbox"
+                          id="selectAllTasks"
+                          title="全选 / 取消全选"
+                        />
+                      </th>
+                      <th style="width: 31%">文件名 / 任务ID</th>
+                      <th style="width: 13%">状态</th>
                       <th style="width: 20%">进度</th>
-                      <th style="width: 30%">操作</th>
+                      <th style="width: 32%">操作</th>
                     </tr>
                   </thead>
                   <tbody id="historyTableBody"></tbody>
@@ -356,6 +414,6 @@ Demand=需求</textarea
     <!-- Modals & Overlays -->
     <div class="toast-container" id="toastContainer"></div>
 
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=3"></script>
   </body>
 </html>

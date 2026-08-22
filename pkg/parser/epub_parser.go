@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
+	"regexp"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
@@ -29,6 +32,10 @@ type nodeTextInfo struct {
 type blockInfo struct {
 	element *html.Node
 	nodes   []nodeTextInfo
+	// source is the block text as extracted; used to detect a "translation"
+	// that is just the untranslated original, so bilingual output never
+	// duplicates the same paragraph.
+	source string
 }
 
 func preserveEdgeWhitespace(original, translated string) string {
@@ -172,6 +179,20 @@ func buildBlockText(nodes []nodeTextInfo) string {
 	return sb.String()
 }
 
+// splitFilePattern matches converter-generated fragment files like
+// "book_split_012.html" where one real chapter/book was sliced into many
+// files. All fragments of the same base share one chapter stream.
+var splitFilePattern = regexp.MustCompile(`^(.+)_split_\d+$`)
+
+// chapterIDForFile groups split fragments under their common base name.
+func chapterIDForFile(name string) string {
+	base := strings.TrimSuffix(name, path.Ext(name))
+	if m := splitFilePattern.FindStringSubmatch(base); m != nil {
+		return m[1]
+	}
+	return name
+}
+
 // Extract extracts translatable text nodes fromxhtml/html files inside the epub.
 func (p *EpubParser) Extract(inputPath string) ([]TextBlock, error) {
 	p.originalZipPath = inputPath
@@ -201,6 +222,7 @@ func (p *EpubParser) Extract(inputPath string) ([]TextBlock, error) {
 
 			p.parsedFiles[name] = doc
 
+			var fileBlocks []TextBlock
 			blockIndex := 0
 			var traverse func(*html.Node)
 			traverse = func(n *html.Node) {
@@ -221,12 +243,14 @@ func (p *EpubParser) Extract(inputPath string) ([]TextBlock, error) {
 						}
 						blockText := buildBlockText(info.nodes)
 						if strings.TrimSpace(blockText) != "" {
+							info.source = blockText
 							id := fmt.Sprintf("%s_block_%d", name, blockIndex)
 							blockIndex++
 							p.blockInfos[id] = info
-							blocks = append(blocks, TextBlock{
+							fileBlocks = append(fileBlocks, TextBlock{
 								ID:           id,
 								OriginalText: blockText,
+								HeadingLevel: headingLevelOf(n),
 							})
 						}
 					}
@@ -244,10 +268,49 @@ func (p *EpubParser) Extract(inputPath string) ([]TextBlock, error) {
 				}
 			}
 			traverse(doc)
+
+			// Each content file is treated as one chapter so blocks inside it
+			// share translation context; converter fragments ("*_split_NNN")
+			// are aggregated back into one stream under their base name. The
+			// first short block is usually the chapter heading, use it as the
+			// chapter title. Processors additionally cut real chapters at
+			// h1/h2 heading blocks inside the stream.
+			chapterID := chapterIDForFile(name)
+			chapterTitle := ""
+			if len(fileBlocks) > 0 && utf8.RuneCountInString(fileBlocks[0].OriginalText) <= 80 {
+				chapterTitle = strings.TrimSpace(fileBlocks[0].OriginalText)
+			}
+			for i := range fileBlocks {
+				fileBlocks[i].ChapterID = chapterID
+				fileBlocks[i].ChapterTitle = chapterTitle
+			}
+			blocks = append(blocks, fileBlocks...)
 		}
 	}
 
 	return blocks, nil
+}
+
+// headingLevelOf returns 1-6 for h1..h6 elements, 0 otherwise.
+func headingLevelOf(n *html.Node) int {
+	if n == nil || n.Type != html.ElementNode {
+		return 0
+	}
+	switch n.DataAtom {
+	case atom.H1:
+		return 1
+	case atom.H2:
+		return 2
+	case atom.H3:
+		return 3
+	case atom.H4:
+		return 4
+	case atom.H5:
+		return 5
+	case atom.H6:
+		return 6
+	}
+	return 0
 }
 
 func findSplitIndex(textRunes []rune, target int) int {
@@ -351,6 +414,13 @@ func (p *EpubParser) Assemble(blocks []TranslatedBlock, outputPath string, bilin
 			continue
 		}
 		if bilingual {
+			// An untranslated paragraph must not be duplicated right after
+			// its original: skip injection when the "translation" is the
+			// source text itself (whitespace-normalized, so reflowed echoes
+			// are caught too).
+			if normalizedText(translated) == normalizedText(info.source) {
+				continue
+			}
 			brNode := &html.Node{Type: html.ElementNode, DataAtom: atom.Br, Data: "br"}
 			translatedNode := &html.Node{Type: html.TextNode, Data: strings.TrimSpace(translated)}
 			if info.element != nil {

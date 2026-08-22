@@ -9,12 +9,30 @@ import (
 type TextBlock struct {
 	ID           string
 	OriginalText string
+	// ChapterID groups blocks that belong to the same chapter. Blocks in the
+	// same chapter share translation context. Empty means "whole document".
+	ChapterID string
+	// ChapterTitle is a short human readable title used as translation
+	// context (e.g. "Chapter 3 - The Rally"). May be empty.
+	ChapterTitle string
+	// HeadingLevel is 1-6 when the block is a heading element (h1..h6),
+	// 0 otherwise. Processors use it to cut real chapters inside large
+	// chapter files or split-file streams.
+	HeadingLevel int
 }
 
 // TranslatedBlock represents the translation result for a corresponding TextBlock.
 type TranslatedBlock struct {
 	ID             string
 	TranslatedText string
+}
+
+// normalizedText collapses all whitespace for equality checks. Used by the
+// bilingual assembly guards: an echo whose line wrapping or spacing was
+// reflowed by the model must still be recognized as untranslated, otherwise
+// the source paragraph would be duplicated in the output.
+func normalizedText(s string) string {
+	return strings.Join(strings.Fields(strings.TrimSpace(s)), " ")
 }
 
 // Parser defines the interface for different file format handlers.

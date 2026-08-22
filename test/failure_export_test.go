@@ -76,7 +76,8 @@ func TestFailure_LogFile_Generation(t *testing.T) {
 	}
 
 	failedBlock := stats.FailedBlocks[0]
-	if failedBlock.ID != "2-0" && failedBlock.ID != "2" {
+	// Chapter batching: both blocks share batch doc@0, which failed as a unit.
+	if failedBlock.ID != "doc@0" {
 		t.Errorf("Unexpected failed block ID: %s", failedBlock.ID)
 	}
 	if !strings.Contains(failedBlock.OriginalText, "Fail text") {
