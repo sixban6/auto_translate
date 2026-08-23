@@ -165,13 +165,17 @@ func autoCalculateLogic(ramBytes uint64, modSizeBytes uint64, osType string) int
 	return recommended
 }
 
+// maxConcurrencyByCPU caps concurrency for AUTO planning only. LLM
+// translation is I/O-bound (network + GPU queue): the workers mostly wait,
+// so auto values stay conservative to keep desktops responsive — but a
+// user-specified value is never clamped here (user intent wins).
 func maxConcurrencyByCPU() int {
 	cap := runtime.NumCPU() - 1
 	if cap < 1 {
 		return 1
 	}
 	if cap > 4 {
-		return 4 // 强行限制最大并发为 4，防止桌面级 CPU 满载无响应
+		return 4 // auto-planning stays conservative on desktop machines
 	}
 	return cap
 }

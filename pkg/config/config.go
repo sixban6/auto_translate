@@ -29,13 +29,30 @@ const (
 	DefaultMLXEndpoint      = "http://127.0.0.1:8080/v1/chat/completions"
 )
 
-// OMLXSettingsPath returns the oMLX settings file location (~/.omlx/settings.json).
+// OMLXSettingsPath returns the oMLX settings file location. The desktop
+// app version stores its data under a custom base path ("…/omlx/base/…",
+// recorded in ~/Library/Application Support/oMLX/base-path); the legacy
+// location is ~/.omlx/settings.json.
 func OMLXSettingsPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".omlx", "settings.json")
+	candidates := []string{
+		filepath.Join(home, ".omlx", "settings.json"),
+	}
+	// Desktop app: resolve the custom base path via its app-support marker.
+	if bp, err := os.ReadFile(filepath.Join(home, "Library", "Application Support", "oMLX", "base-path")); err == nil {
+		if base := strings.TrimSpace(string(bp)); base != "" {
+			candidates = append(candidates, filepath.Join(base, "settings.json"))
+		}
+	}
+	for _, p := range candidates {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return candidates[0]
 }
 
 // ReadOMLXAPIKey extracts auth.api_key from the local oMLX settings file.

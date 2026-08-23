@@ -249,8 +249,9 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
 
-  // Refresh the "auto" option label of the concurrency select with the
-  // backend's live recommendation (RAM / model aware).
+  // Rebuild the concurrency select's numeric options from the backend's
+  // live recommendation: 1 .. 2x recommended (auto option stays on top).
+  // The user's current pick is preserved while it stays within range.
   function updateConcurrencyAutoLabel(recommended) {
     const concSelect = document.getElementById("concurrencySelect");
     if (!concSelect) return;
@@ -261,6 +262,27 @@ document.addEventListener("DOMContentLoaded", () => {
     } else {
       autoOpt.textContent = "自动（跟随智能规划）";
     }
+    if (recommended <= 0) return;
+
+    const prev = concSelect.value;
+    concSelect.querySelectorAll('option:not([value="0"])').forEach((o) => o.remove());
+    const max = Math.max(2, recommended * 2);
+    for (let n = 1; n <= max; n++) {
+      const opt = document.createElement("option");
+      opt.value = String(n);
+      if (n === recommended) {
+        opt.textContent = `${n} · 推荐`;
+      } else if (n === max) {
+        opt.textContent = `${n} · 上限（推荐×2）`;
+      } else {
+        opt.textContent = String(n);
+      }
+      concSelect.appendChild(opt);
+    }
+    // Keep the user's selection if still available, else fall back to auto.
+    concSelect.value = [...concSelect.options].some((o) => o.value === prev)
+      ? prev
+      : "0";
   }
 
   // Debounced explain-config probe; keeps the concurrency recommendation
