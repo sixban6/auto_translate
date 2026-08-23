@@ -89,9 +89,11 @@ document.addEventListener("DOMContentLoaded", () => {
         engine: config.engine,
         api_url: config.api_url,
         max_chunk_size: config.max_chunk_size,
+        concurrency: config.concurrency,
         request_timeout_sec: config.request_timeout_sec,
         max_retries: config.max_retries,
         bilingual: config.bilingual,
+        chapter_batching: config.chapter_batching,
         completion_chime: completionChimeInput.checked,
       })
     );
@@ -128,6 +130,11 @@ document.addEventListener("DOMContentLoaded", () => {
         if (conf.bilingual !== undefined)
           document.querySelector('input[name="bilingual"]').checked =
             conf.bilingual;
+        const chapterToggle = configForm.querySelector(
+          'input[name="chapter_batching"]'
+        );
+        if (chapterToggle && conf.chapter_batching !== undefined)
+          chapterToggle.checked = conf.chapter_batching;
         if (conf.completion_chime !== undefined)
           completionChimeInput.checked = conf.completion_chime;
         const chunkSelect = document.getElementById("chunkSizeSelect");
@@ -136,6 +143,14 @@ document.addEventListener("DOMContentLoaded", () => {
           if (chunkSelect.value !== String(conf.max_chunk_size)) {
             // Saved value has no matching option (e.g. legacy): fall back to auto.
             chunkSelect.value = "0";
+          }
+        }
+        const concSelect = document.getElementById("concurrencySelect");
+        if (conf.concurrency !== undefined && concSelect) {
+          concSelect.value = String(conf.concurrency);
+          if (concSelect.value !== String(conf.concurrency)) {
+            // Saved value has no matching option: fall back to auto.
+            concSelect.value = "0";
           }
         }
       }
@@ -234,6 +249,27 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
 
+  // Refresh the "auto" option label of the concurrency select with the
+  // backend's live recommendation (RAM / model aware).
+  function updateConcurrencyAutoLabel(recommended) {
+    const concSelect = document.getElementById("concurrencySelect");
+    if (!concSelect) return;
+    const autoOpt = concSelect.querySelector('option[value="0"]');
+    if (!autoOpt) return;
+    if (recommended > 0) {
+      autoOpt.textContent = `自动（当前推荐：${recommended}）`;
+    } else {
+      autoOpt.textContent = "自动（跟随智能规划）";
+    }
+  }
+
+  // Debounced explain-config probe; keeps the concurrency recommendation
+  // label fresh and the dashboard explanation in sync.
+  function scheduleExplain(delay = 500) {
+    clearTimeout(window.explainTimeout);
+    window.explainTimeout = setTimeout(fetchExplanation, delay);
+  }
+
   modelSelect.addEventListener("change", (e) => {
     if (e.target.value === "__custom__") {
       modelInput.style.display = "block";
@@ -251,6 +287,8 @@ document.addEventListener("DOMContentLoaded", () => {
       engineSelect.value = optEngine;
       applyEngineDefaults(optEngine, false);
     }
+    // Engine/model may have changed: refresh the concurrency recommendation.
+    scheduleExplain(300);
   });
 
   // Fetch Models Function
@@ -313,6 +351,11 @@ document.addEventListener("DOMContentLoaded", () => {
           });
           updateChunkAutoLabel(firstRecommended);
 
+          // Models/engine changed: refresh the concurrency recommendation
+          // label too (the programmatic change event below does not bubble
+          // to the form listener).
+          scheduleExplain(400);
+
           const customOpt = document.createElement("option");
           customOpt.value = "__custom__";
           customOpt.textContent = "➕ 自定义手动输入...";
@@ -342,7 +385,10 @@ document.addEventListener("DOMContentLoaded", () => {
   // Initialize models list: auto-detect engines when the URL is still a
   // known default; probe the custom URL directly otherwise.
   fetchModels(isEngineDefaultURL(apiURLInput.value.trim()));
-  apiURLInput.addEventListener("blur", () => fetchModels(false));
+  apiURLInput.addEventListener("blur", () => {
+    fetchModels(false);
+    scheduleExplain(300);
+  });
 
   async function fetchRoles() {
     try {
@@ -909,7 +955,6 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Fetch Explanation Function
   async function fetchExplanation() {
-    if (!currentFile) return;
     const config = buildConfigFromForm();
 
     try {
@@ -920,9 +965,21 @@ document.addEventListener("DOMContentLoaded", () => {
       });
       if (res.ok) {
         const data = await res.json();
-        const configExplanation = document.getElementById("configExplanation");
-        configExplanation.textContent = data.explanation;
-        configExplanation.classList.remove("hidden");
+        // The concurrency recommendation is useful even before a task is
+        // open: keep the "auto" option labeled with the live value while
+        // the user is in auto mode.
+        if (
+          data.concurrency !== undefined &&
+          document.getElementById("concurrencySelect").value === "0"
+        ) {
+          updateConcurrencyAutoLabel(data.concurrency);
+        }
+        // The explanation panel belongs to an open task's dashboard.
+        if (currentFile && !dashboard.classList.contains("hidden")) {
+          const configExplanation = document.getElementById("configExplanation");
+          configExplanation.textContent = data.explanation;
+          configExplanation.classList.remove("hidden");
+        }
       }
     } catch (e) {
       console.warn("Failed to fetch explanation", e);
@@ -951,10 +1008,14 @@ document.addEventListener("DOMContentLoaded", () => {
     config.bilingual = configForm.querySelector(
       'input[name="bilingual"]'
     ).checked;
+    config.chapter_batching = configForm.querySelector(
+      'input[name="chapter_batching"]'
+    ).checked;
     delete config.glossary_text;
 
-    // Type conversions
-    config.concurrency = 0;
+    // Type conversions. Concurrency follows the select: 0 = let the
+    // backend auto-plan (RAM/model aware), 1-4 = user-pinned.
+    config.concurrency = parseInt(config.concurrency || "0", 10) || 0;
     config.max_chunk_size = parseInt(config.max_chunk_size || "0", 10) || 0;
     config.request_timeout_sec = parseInt(config.request_timeout_sec);
     config.max_retries = parseInt(config.max_retries);
@@ -962,11 +1023,9 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   configForm.addEventListener("change", () => {
-    if (!dashboard.classList.contains("hidden")) {
-      // Debounced fetch
-      clearTimeout(window.explainTimeout);
-      window.explainTimeout = setTimeout(fetchExplanation, 500);
-    }
+    // Debounced probe: refreshes the concurrency recommendation label at
+    // all times and the dashboard explanation when a task is open.
+    scheduleExplain();
   });
 
   // File Handling

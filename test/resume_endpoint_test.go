@@ -43,7 +43,7 @@ func TestResumeEndpoint(t *testing.T) {
 
 	// Kill and restart server
 	srv.Close()
-	srv2 := startServer(t)
+	srv2 := startServerAt(t, srv.WorkDir)
 	defer srv2.Close()
 
 	respStat, err := client.Get(srv2.BaseURL + "/api/task_status?task_id=" + taskID)

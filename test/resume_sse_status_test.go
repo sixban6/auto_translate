@@ -37,7 +37,7 @@ func TestResumeSSEStatus(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	srv.Close()
-	srv2 := startServer(t)
+	srv2 := startServerAt(t, srv.WorkDir)
 	defer srv2.Close()
 
 	reqRes, _ := http.NewRequest("POST", srv2.BaseURL+"/api/resume?task_id="+taskID, nil)

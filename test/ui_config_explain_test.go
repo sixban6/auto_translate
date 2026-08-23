@@ -30,3 +30,31 @@ func TestExplanationLog_Generation(t *testing.T) {
 		t.Errorf("Expected different explanations for different models")
 	}
 }
+
+// TestConfigExplanation_UserPinnedConcurrency pins the user-override
+// semantics: an explicitly set concurrency survives auto-detection and the
+// explanation says so (the web UI concurrency selector relies on this).
+func TestConfigExplanation_UserPinnedConcurrency(t *testing.T) {
+	cfg := &config.Config{Model: "qwen:7b", Concurrency: 2}
+	cfg.AutoDetectAndCalculate()
+	if cfg.Concurrency != 2 {
+		t.Errorf("user-pinned concurrency must survive auto-detection, got %d", cfg.Concurrency)
+	}
+	explain := config.GetConfigExplanation(cfg)
+	if !strings.Contains(explain, "用户指定并发数：2") {
+		t.Errorf("explanation must state the user-pinned value: %s", explain)
+	}
+}
+
+// TestConfigExplanation_AutoConcurrency labels the auto path.
+func TestConfigExplanation_AutoConcurrency(t *testing.T) {
+	cfg := &config.Config{Model: "qwen:7b"}
+	cfg.AutoDetectAndCalculate()
+	if cfg.Concurrency < 1 {
+		t.Errorf("auto path must produce a usable concurrency >= 1, got %d", cfg.Concurrency)
+	}
+	explain := config.GetConfigExplanation(cfg)
+	if !strings.Contains(explain, "并发数：") {
+		t.Errorf("explanation missing concurrency info: %s", explain)
+	}
+}

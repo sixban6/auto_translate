@@ -56,6 +56,7 @@ func TestProcess_RetryRecoversUntranslatedParagraphs(t *testing.T) {
 	cfg := &config.Config{
 		APIURL:            server.URL,
 		Model:             "dummy",
+		ChapterBatching:   true,
 		MaxChunkSize:      2000,
 		Concurrency:       1,
 		MaxRetries:        1,

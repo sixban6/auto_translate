@@ -18,7 +18,35 @@ type TestServer struct {
 }
 
 func startServer(t *testing.T) *TestServer {
-	workDir := filepath.Join("..")
+	return startServerAt(t, "")
+}
+
+// startServerAt launches the webrunner test server in a sandboxed working
+// directory. With dir == "" a fresh sandbox is created; passing a previous
+// TestServer's WorkDir reuses that sandbox so on-disk task state survives a
+// server restart (the persistence/restart tests depend on this).
+func startServerAt(t *testing.T, dir string) *TestServer {
+	root, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatalf("resolve project root: %v", err)
+	}
+	workDir := dir
+	if workDir == "" {
+		workDir = t.TempDir()
+	}
+	// Read-only assets are symlinked into the sandbox so the server's
+	// relative lookups (web/, prompts/) resolve, while temp_uploads/ (task
+	// states, uploads) stays inside the sandbox and never touches the real
+	// project data.
+	for _, sub := range []string{"web", "prompts"} {
+		link := filepath.Join(workDir, sub)
+		if _, err := os.Lstat(link); err == nil {
+			continue // sandbox reuse: symlink already in place
+		}
+		if err := os.Symlink(filepath.Join(root, sub), link); err != nil {
+			t.Fatalf("symlink %s into sandbox: %v", sub, err)
+		}
+	}
 
 	// Block openBrowser by injecting a dummy open/xdg-open
 	binDir := t.TempDir()
@@ -40,7 +68,7 @@ func startServer(t *testing.T) *TestServer {
 	// processing queued tasks against real local ports.
 	serverBin := filepath.Join(binDir, "webrunner_test_bin")
 	buildCmd := exec.Command("go", "build", "-o", serverBin, "./cmd/webrunner")
-	buildCmd.Dir = workDir
+	buildCmd.Dir = root // module root; the sandbox has no go.mod
 	if out, err := buildCmd.CombinedOutput(); err != nil {
 		t.Fatalf("build webrunner: %v\n%s", err, out)
 	}

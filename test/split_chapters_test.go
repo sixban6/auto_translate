@@ -43,6 +43,7 @@ func TestEpubSplitFragmentsAggregateIntoOneChapter(t *testing.T) {
 		RequestTimeoutSec: 10,
 		MaxRetries:        1,
 		Concurrency:       1,
+		ChapterBatching:   true,
 	}
 	proc := processor.New(cfg, translator.New(cfg))
 	if _, _, err := proc.Process(context.Background(), blocks, nil, nil, nil); err != nil {
@@ -75,6 +76,7 @@ func TestHeadingBlocksCutChapters(t *testing.T) {
 		RequestTimeoutSec: 10,
 		MaxRetries:        1,
 		Concurrency:       1,
+		ChapterBatching:   true,
 	}
 	proc := processor.New(cfg, translator.New(cfg))
 

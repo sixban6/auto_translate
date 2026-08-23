@@ -102,6 +102,13 @@
 
           <div class="form-section">
             <div class="section-title">翻译参数</div>
+            <div class="form-group toggle-group">
+              <label>章节批处理模式</label>
+              <label class="switch">
+                <input type="checkbox" name="chapter_batching" />
+                <span class="slider round"></span>
+              </label>
+            </div>
             <div class="form-group">
               <label>章节批次大小 (字符)</label>
               <select
@@ -115,6 +122,20 @@
                 <option value="3200">3200 · 大（≥14B 模型推荐）</option>
                 <option value="4800">4800 · 超大</option>
                 <option value="6400">6400 · 特大（重试代价高）</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>并发数 (同时翻译批次数)</label>
+              <select
+                id="concurrencySelect"
+                name="concurrency"
+                class="select-input"
+              >
+                <option value="0" selected>自动（跟随智能规划）</option>
+                <option value="1">1 · 保守（内存紧张时选此）</option>
+                <option value="2">2</option>
+                <option value="3">3</option>
+                <option value="4">4 · 上限（CPU 约束）</option>
               </select>
             </div>
             <div class="form-group">
@@ -414,6 +435,6 @@ Demand=需求</textarea
     <!-- Modals & Overlays -->
     <div class="toast-container" id="toastContainer"></div>
 
-    <script src="/static/app.js?v=3"></script>
+    <script src="/static/app.js?v=5"></script>
   </body>
 </html>

@@ -125,6 +125,7 @@ func TestProcessorChapterContextBatches(t *testing.T) {
 	defer server.Close()
 
 	cfg := &config.Config{
+		ChapterBatching:   true,
 		MaxChunkSize:      130,
 		APIURL:            server.URL,
 		Model:             "translategemma:12b",
@@ -211,6 +212,7 @@ func TestProcessorNewFormatResume(t *testing.T) {
 	defer server.Close()
 
 	cfg := &config.Config{
+		ChapterBatching:   true,
 		MaxChunkSize:      1000,
 		APIURL:            server.URL,
 		Model:             "translategemma:12b",
@@ -256,7 +258,7 @@ func TestProcessorNewFormatResume(t *testing.T) {
 }
 
 func TestProcessorReassembleLegacyAndNewKeys(t *testing.T) {
-	cfg := &config.Config{MaxChunkSize: 1000, Concurrency: 1}
+	cfg := &config.Config{ChapterBatching: true, MaxChunkSize: 1000, Concurrency: 1}
 	proc := processor.New(cfg, nil)
 
 	blocks := []parser.TextBlock{
@@ -302,12 +304,12 @@ func TestTranslatorEnginePayloads(t *testing.T) {
 		defer server.Close()
 
 		cfg := &config.Config{
-			Engine:           "mlx",
-			APIURL:           server.URL,
-			Model:            "mlx-community/Qwen2.5-7B-Instruct-4bit",
-			Prompt:           "p",
+			Engine:            "mlx",
+			APIURL:            server.URL,
+			Model:             "mlx-community/Qwen2.5-7B-Instruct-4bit",
+			Prompt:            "p",
 			RequestTimeoutSec: 5,
-			MaxRetries:       1,
+			MaxRetries:        1,
 		}
 		tr := translator.New(cfg)
 		out, status, err := tr.Translate(context.Background(), "hello world text")
@@ -339,12 +341,12 @@ func TestTranslatorEnginePayloads(t *testing.T) {
 		defer server.Close()
 
 		cfg := &config.Config{
-			Engine:           "ollama",
-			APIURL:           server.URL + "/v1/chat/completions",
-			Model:            "qwen2.5:14b",
-			Prompt:           "p",
+			Engine:            "ollama",
+			APIURL:            server.URL + "/v1/chat/completions",
+			Model:             "qwen2.5:14b",
+			Prompt:            "p",
 			RequestTimeoutSec: 5,
-			MaxRetries:       1,
+			MaxRetries:        1,
 		}
 		tr := translator.New(cfg)
 		out, _, err := tr.Translate(context.Background(), "hello world text")
@@ -371,15 +373,15 @@ func TestResolveEngine(t *testing.T) {
 	cases := []struct {
 		engine, apiURL, model, want string
 	}{
-		{"", "", "", translator.EngineOmlx},                                              // default engine
-		{"omlx", "http://127.0.0.1:8080/v1/chat/completions", "x", translator.EngineOmlx},  // explicit wins
+		{"", "", "", translator.EngineOmlx},                                                              // default engine
+		{"omlx", "http://127.0.0.1:8080/v1/chat/completions", "x", translator.EngineOmlx},                // explicit wins
 		{"", "http://127.0.0.1:8000/v1/chat/completions", "Qwen3.8-27B-oQ4e-mtp", translator.EngineOmlx}, // :8000 hint
-		{"mlx", "http://localhost:11434/v1/chat/completions", "x", translator.EngineMLX},  // explicit wins
+		{"mlx", "http://localhost:11434/v1/chat/completions", "x", translator.EngineMLX},                 // explicit wins
 		{"ollama", "http://127.0.0.1:8080/v1/chat/completions", "mlx-community/Qwen2.5-7B", translator.EngineOllama},
 		{"", "http://localhost:11434/v1/chat/completions", "qwen", translator.EngineOllama}, // URL hint
 		{"", "http://127.0.0.1:8080/v1/chat/completions", "mlx-community/Qwen2.5-7B-Instruct-4bit", translator.EngineMLX},
-		{"", "http://127.0.0.1:8080", "qwen2.5:14b", translator.EngineOllama},              // naming style
-		{"", "", "translategemma:12b", translator.EngineMLX},                              // legacy special case
+		{"", "http://127.0.0.1:8080", "qwen2.5:14b", translator.EngineOllama}, // naming style
+		{"", "", "translategemma:12b", translator.EngineMLX},                  // legacy special case
 	}
 	for i, c := range cases {
 		if got := config.ResolveEngine(c.apiURL, c.model, c.engine); got != c.want {
@@ -401,6 +403,7 @@ func TestProcessorProportionalMappingFallback(t *testing.T) {
 	defer server.Close()
 
 	cfg := &config.Config{
+		ChapterBatching:   true,
 		MaxChunkSize:      1000,
 		APIURL:            server.URL,
 		Model:             "translategemma:12b",
@@ -461,12 +464,12 @@ func TestOmlxEndpointPathCompletion(t *testing.T) {
 
 			hostPort := net.JoinHostPort("127.0.0.1", strconv.Itoa(ln.Addr().(*net.TCPAddr).Port))
 			cfg := &config.Config{
-				Engine:           "omlx",
-				APIURL:           fmt.Sprintf(tc.urlShape, hostPort),
-				Model:            "Qwen3.8-27B-oQ4e-mtp",
-				Prompt:           "p",
+				Engine:            "omlx",
+				APIURL:            fmt.Sprintf(tc.urlShape, hostPort),
+				Model:             "Qwen3.8-27B-oQ4e-mtp",
+				Prompt:            "p",
 				RequestTimeoutSec: 5,
-				MaxRetries:       1,
+				MaxRetries:        1,
 			}
 			tr := translator.New(cfg)
 			if _, _, err := tr.Translate(context.Background(), "hello translation text"); err != nil {

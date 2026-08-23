@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -54,10 +55,41 @@ type Translator struct {
 	client *http.Client
 }
 
+// kwargsSupport caches, per chat-completions URL, whether the server
+// accepts the (non-standard) chat_template_kwargs field. Sending it to a
+// strictly-validating server turns every request into a 400 and kills the
+// whole run, so the field is only sent while the server is known (or
+// presumed) to accept it; a 4xx rejection disables it for the process.
+var (
+	kwargsMu      sync.Mutex
+	kwargsSupport = make(map[string]bool)
+)
+
+func kwargsAllowed(url string) bool {
+	kwargsMu.Lock()
+	defer kwargsMu.Unlock()
+	supported, known := kwargsSupport[url]
+	return !known || supported
+}
+
+func markKwargsRejected(url string) {
+	kwargsMu.Lock()
+	defer kwargsMu.Unlock()
+	kwargsSupport[url] = false
+}
+
+// payloadHasKwargs reports whether the marshaled request body carries the
+// chat_template_kwargs field.
+func payloadHasKwargs(data []byte) bool {
+	return bytes.Contains(data, []byte("chat_template_kwargs"))
+}
+
 var latinDoubleDashPattern = regexp.MustCompile(`([A-Za-z])[—–-]{2,}([A-Za-z])`)
 var rePrefixBeforeHanPattern = regexp.MustCompile(`(?i)\bre\s*[—–-]?\s*([\p{Han}])`)
 
 // reThinkingBlock matches a complete thinking block (Qwen <think>,
+// DeepSeek <thinking>, R1-style <reasoning>). Go's RE2 has no
+// backreferences, so the three tag names are enumerated.
 // DeepSeek <thinking>, R1-style <reasoning>).
 var reThinkingBlock = regexp.MustCompile(`(?is)<\s*(?:think|thinking|reasoning)\s*>.*?<\s*/\s*(?:think|thinking|reasoning)\s*>`)
 
@@ -65,6 +97,29 @@ var reThinkingBlock = regexp.MustCompile(`(?is)<\s*(?:think|thinking|reasoning)\
 // the model ran out of tokens inside its thinking, so everything after it
 // is thinking residue rather than a translation.
 var reUnterminatedThink = regexp.MustCompile(`(?s)^\s*<\s*(?:think|thinking|reasoning)\s*>.*`)
+
+// Prompt-block leak markers: a confused small model sometimes answers with
+// a fragment of the system prompt instead of a translation. The injected
+// control blocks are recognizable by their bracketed markers; the glossary
+// and format blocks always end with a full stop.
+var (
+	reGlossaryBlockLeak = regexp.MustCompile(`(?m)\[术语表[^\n]*?(。|$)`)
+	reFormatBlockLeak  = regexp.MustCompile(`(?m)\[格式要求\][^\n]*`)
+)
+
+// stripPromptBlockLeaks removes echoed glossary / format-requirement
+// blocks from a model answer. It reports whether anything other than those
+// prompt fragments remains — an answer consisting solely of them is a
+// prompt echo, not a translation.
+func stripPromptBlockLeaks(s string) (string, bool) {
+	if !strings.Contains(s, "[术语表") && !strings.Contains(s, "[格式要求]") {
+		return s, true
+	}
+	cleaned := reGlossaryBlockLeak.ReplaceAllString(s, "")
+	cleaned = reFormatBlockLeak.ReplaceAllString(cleaned, "")
+	cleaned = strings.TrimSpace(cleaned)
+	return cleaned, cleaned != ""
+}
 
 // StripThinkingBlocks removes model thinking blocks from a response. A
 // leading unterminated block swallows the whole string (the model never got
@@ -224,6 +279,23 @@ func (t *Translator) TranslateBatch(ctx context.Context, req TranslateRequest, o
 			if ctx.Err() != nil {
 				return "", StatusFailed, fmt.Errorf("API request cancelled: %w", ctx.Err())
 			}
+			// Capability downgrade: a 4xx on a request carrying
+			// chat_template_kwargs usually means the server rejects the
+			// unknown field. Drop it process-wide and retry this attempt
+			// immediately instead of burning the whole retry budget.
+			if resp.StatusCode >= 400 && resp.StatusCode < 500 && payloadHasKwargs(jsonData) {
+				markKwargsRejected(requestURL)
+				if ev != nil {
+					ev(fmt.Sprintf("服务器不支持 chat_template_kwargs (HTTP %d)，已自动降级并重试", resp.StatusCode))
+				}
+				_, payload = t.buildRequest(req)
+				jsonData, err = json.Marshal(payload)
+				if err != nil {
+					return "", StatusFailed, fmt.Errorf("failed to marshal payload: %w", err)
+				}
+				attempt-- // capability probe does not consume an attempt
+				continue
+			}
 			if attempt == maxRetries {
 				return "", StatusFailed, fmt.Errorf("API returned non-200 status %d after %d attempts", resp.StatusCode, maxRetries)
 			}
@@ -308,6 +380,16 @@ func (t *Translator) TranslateBatch(ctx context.Context, req TranslateRequest, o
 	translated = rePrefixBeforeHanPattern.ReplaceAllString(translated, "$1")
 	translated = stripContextMarkerLeaks(translated, req)
 
+	// Prompt-echo guard: a model that answered with the injected glossary
+	// or format block produced no translation at all. Keep the source text
+	// (fallback) so the processor's single-paragraph retry pass takes over
+	// — and so the garbage is never cached as a success.
+	if cleaned, hasTranslation := stripPromptBlockLeaks(translated); !hasTranslation {
+		return text, StatusFallback, nil
+	} else if cleaned != translated {
+		translated = cleaned
+	}
+
 	// Same-language paraphrase detection: a Chinese-output role given
 	// non-Han source must produce Han text. An English rewrite of English
 	// text means the model failed to translate — surface it as a fallback
@@ -338,20 +420,35 @@ func (t *Translator) buildRequest(req TranslateRequest) (string, map[string]inte
 			},
 		}
 	}
-	return t.openAIChatURL(), map[string]interface{}{
+	payload := map[string]interface{}{
 		"model":       t.cfg.Model,
 		"messages":    messages,
 		"temperature": t.cfg.Temperature,
 		"stream":      false,
 		"max_tokens":  batchMaxTokens(req.Text),
-		// Qwen3-style hybrid models default to thinking ON in their chat
-		// template; for translation that only burns tokens and latency.
-		// Standard OpenAI-compat switch (MLX-LM, vLLM, ...); servers that
-		// do not know the field ignore it.
-		"chat_template_kwargs": map[string]interface{}{
-			"enable_thinking": false,
-		},
 	}
+	if t.engine() == config.EngineOmlx {
+		// oMLX sampling defaults can go stale server-side (observed: a
+		// corrupted min_p=1.05 that silently empties every non-stream
+		// response with HTTP 200). Explicitly pinning the sampler works
+		// around it and matches the Hy-MT2 recommended settings.
+		payload["top_p"] = 0.6
+		payload["top_k"] = 20
+		payload["min_p"] = 0.0
+		payload["repetition_penalty"] = 1.05
+	}
+	// Qwen3-style hybrid models default to thinking ON in their chat
+	// template; for translation that only burns tokens and latency. This is
+	// a non-standard OpenAI field: MLX-LM / vLLM accept it, but strict
+	// servers reject unknown fields with 4xx — so it is only sent while the
+	// server accepts it (see kwargsSupport) and is dropped automatically on
+	// the first rejection.
+	if kwargsAllowed(t.openAIChatURL()) {
+		payload["chat_template_kwargs"] = map[string]interface{}{
+			"enable_thinking": false,
+		}
+	}
+	return t.openAIChatURL(), payload
 }
 
 // buildSystemPrompt combines the role prompt with glossary, paragraph-format

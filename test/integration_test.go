@@ -52,7 +52,8 @@ func TestIntegration(t *testing.T) {
 		"prompt": "test",
 		"input_file": "` + inputPath + `",
 		"output_file": "` + outputPath + `",
-		"bilingual": true
+		"bilingual": true,
+		"chapter_batching": true
 	}`
 	os.WriteFile(configPath, []byte(configStr), 0644)
 

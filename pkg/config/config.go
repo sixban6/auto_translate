@@ -112,6 +112,13 @@ type Config struct {
 	InputFile         string            `json:"input_file"`          // Path to input file (.txt, .epub)
 	OutputFile        string            `json:"output_file"`         // Path to save output file
 	Bilingual         bool              `json:"bilingual"`           // Output bilingual format if true
+	// ChapterBatching enables the chapter-aware pipeline: paragraphs of
+	// the same chapter are packed into batches and translated with the
+	// chapter title plus rolling previous-tail context. When false (the
+	// default), every paragraph is translated independently — the classic
+	// per-block mode — with state keys identical to the pre-chapter
+	// version, so old checkpoints resume seamlessly.
+	ChapterBatching   bool              `json:"chapter_batching"`
 	SystemWarning     string            `json:"-"`                   // Runtime hardware warning
 	SystemInfoMsg     string            `json:"-"`                   // Runtime hardware info
 }
@@ -221,12 +228,24 @@ func EngineLabel(engine string) string {
 func GetConfigExplanation(cfg *Config) string {
 	var sb strings.Builder
 	sb.WriteString(cfg.SystemInfoMsg)
-	sb.WriteString(fmt.Sprintf("\n[当前策略] 引擎=%s | 模型=%s | 章节批次大小=%d | 重试=%d | 超时=%ds", EngineLabel(cfg.Engine), cfg.Model, cfg.MaxChunkSize, cfg.MaxRetries, cfg.RequestTimeoutSec))
+	sb.WriteString(fmt.Sprintf("\n[当前策略] 引擎=%s | 模型=%s | 模式=%s | 章节批次大小=%d | 重试=%d | 超时=%ds", EngineLabel(cfg.Engine), cfg.Model, modeLabel(cfg), cfg.MaxChunkSize, cfg.MaxRetries, cfg.RequestTimeoutSec))
 	if cfg.SystemWarning != "" {
 		sb.WriteString("\n[运行警告] " + cfg.SystemWarning)
 	}
 	return sb.String()
 }
+
+// modeLabel describes the batching strategy in user-facing messages.
+func modeLabel(cfg *Config) string {
+	if cfg.ChapterBatching {
+		return "章节批处理"
+	}
+	return "逐段直译"
+}
+
+// ModeLabel is the exported form of modeLabel for other packages (logs,
+// resume notices).
+func ModeLabel(cfg *Config) string { return modeLabel(cfg) }
 
 // modelParamCountGB extracts the parameter count ("7B", "27B", "0.5B"...)
 // from a model name; 0 when absent.

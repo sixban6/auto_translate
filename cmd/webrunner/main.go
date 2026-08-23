@@ -260,11 +260,23 @@ func latestStateFile(dir, taskID string) string {
 }
 
 func safeSendTaskMessage(t *TranslationTask, msg webtask.LogMsg) {
-	defer func() {
-		recover()
-	}()
-	if t.MessageCh != nil {
-		t.MessageCh <- msg
+	// Non-blocking: the SSE consumer may be gone (tab closed, task paused).
+	// Dropping a UI log line is always better than wedging the caller —
+	// for the worker goroutine a blocking send would freeze the entire
+	// task pipeline.
+	trySendTaskMessage(t.MessageCh, msg)
+}
+
+// trySendTaskMessage delivers msg to ch without ever blocking: when the
+// buffer is full or the channel is already closed, the message is dropped.
+func trySendTaskMessage(ch chan webtask.LogMsg, msg webtask.LogMsg) {
+	if ch == nil {
+		return
+	}
+	defer func() { recover() }() // send on closed channel
+	select {
+	case ch <- msg:
+	default:
 	}
 }
 
@@ -782,6 +794,10 @@ func applyResumeConfig(dst *config.Config, src *config.Config, present map[strin
 	if present["bilingual"] {
 		dst.Bilingual = src.Bilingual
 	}
+	if present["chapter_batching"] && dst.ChapterBatching != src.ChapterBatching {
+		dst.ChapterBatching = src.ChapterBatching
+		switched = true
+	}
 	if switched {
 		// Re-plan auto-tuned runtime settings for the new engine/model when
 		// the request did not pin them explicitly. The batch size is restored
@@ -913,19 +929,34 @@ func handleResume(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Task is already running", http.StatusConflict)
 		return
 	}
+	if t.Status == "queued" {
+		// Already pending pickup: re-enqueueing would put a second entry in
+		// the queue and the task would run twice.
+		http.Error(w, "Task is already queued", http.StatusConflict)
+		return
+	}
 
 	t.Status = "queued"
 	t.StatusReason = "resume_queued"
 	t.Error = ""
 	t.MessageCh = make(chan webtask.LogMsg, 100)
+	// Fresh DoneCh: the previous invocation closed the old one on its way
+	// out, and closing it a second time would panic the worker goroutine.
+	t.DoneCh = make(chan struct{})
+	t.Cancel = nil
 	t.InstanceID = instanceID
 	t.LastHeartbeat = time.Now()
 
 	if present != nil && t.Config != nil {
+		wasChapter := t.Config.ChapterBatching
 		if applyResumeConfig(t.Config, &override, present) {
+			note := fmt.Sprintf("模型 %s（引擎 %s），批处理模式：%s", t.Config.Model, config.EngineLabel(t.Config.Engine), config.ModeLabel(t.Config))
+			if t.Config.ChapterBatching != wasChapter {
+				note += "。注意：切换批处理模式后，断点缓存格式不同，已完成段落可能需要重新翻译"
+			}
 			safeSendTaskMessage(t, webtask.LogMsg{
 				Type:    "gray",
-				Message: fmt.Sprintf("🔁 恢复时已应用新配置：模型 %s（引擎 %s）", t.Config.Model, config.EngineLabel(t.Config.Engine)),
+				Message: fmt.Sprintf("🔁 恢复时已应用新配置：%s", note),
 			})
 		}
 	}
@@ -1682,11 +1713,21 @@ func handleExplainConfig(w http.ResponseWriter, r *http.Request) {
 // Background Task Runner
 func runTranslationTask(t *TranslationTask) {
 	defer keepalive.PreventSleep()()
-	defer close(t.MessageCh)
+	// Snapshot the channels for THIS invocation: a pause+resume may swap
+	// t.MessageCh/t.DoneCh while we are winding down, and this invocation
+	// must close exactly the channels it opened (a double-close panic kills
+	// the worker goroutine permanently).
+	msgCh := t.MessageCh
+	if msgCh == nil {
+		msgCh = make(chan webtask.LogMsg, 100)
+		t.MessageCh = msgCh
+	}
+	defer close(msgCh)
 	if t.DoneCh == nil {
 		t.DoneCh = make(chan struct{})
 	}
-	defer close(t.DoneCh)
+	doneCh := t.DoneCh
+	defer close(doneCh)
 	// Re-check the status under the global lock: a delete/pause may have
 	// landed between the worker's pickup and this point.
 	mu.Lock()
@@ -1730,7 +1771,7 @@ func runTranslationTask(t *TranslationTask) {
 	sendLog := func(msg, mType string) {
 		elapsedSec := currentElapsedSec(t, time.Now())
 		etaSec := computeEtaSec(t.Current, t.Total, elapsedSec)
-		t.MessageCh <- webtask.LogMsg{
+		trySendTaskMessage(msgCh, webtask.LogMsg{
 			Type:       mType,
 			Message:    msg,
 			Total:      t.Total,
@@ -1738,7 +1779,7 @@ func runTranslationTask(t *TranslationTask) {
 			Status:     t.Status,
 			ElapsedSec: int(elapsedSec),
 			EtaSec:     etaSec,
-		}
+		})
 	}
 
 	fail := func(err error) {
@@ -1753,13 +1794,13 @@ func runTranslationTask(t *TranslationTask) {
 		saveTaskState(t)
 		elapsedSec := currentElapsedSec(t, time.Now())
 		etaSec := computeEtaSec(t.Current, t.Total, elapsedSec)
-		t.MessageCh <- webtask.LogMsg{
+		trySendTaskMessage(msgCh, webtask.LogMsg{
 			Type:       "red",
 			Message:    fmt.Sprintf("❌ 发生严重错误: %v", err),
 			Status:     "error",
 			ElapsedSec: int(elapsedSec),
 			EtaSec:     etaSec,
-		}
+		})
 	}
 	ext := filepath.Ext(t.Config.InputFile)
 	p, err := parser.GetParser(ext)
@@ -1795,7 +1836,11 @@ func runTranslationTask(t *TranslationTask) {
 	proc := processor.New(t.Config, tr)
 
 	engineName := config.EngineLabel(t.Config.Engine)
-	sendLog(fmt.Sprintf("引擎已启动 (%s, 并发 = %d)。章节上下文批处理模式：同一章节的段落合并为批次翻译，并携带章节标题与前文滚动上下文。", engineName, t.Config.Concurrency), "gray")
+	if t.Config.ChapterBatching {
+		sendLog(fmt.Sprintf("引擎已启动 (%s, 并发 = %d)。章节上下文批处理模式：同一章节的段落合并为批次翻译，并携带章节标题与前文滚动上下文。", engineName, t.Config.Concurrency), "gray")
+	} else {
+		sendLog(fmt.Sprintf("引擎已启动 (%s, 并发 = %d)。逐段直译模式：每个段落独立翻译，不携带章节上下文；超长段落仍会自动拆分。", engineName, t.Config.Concurrency), "gray")
+	}
 	saveTaskState(t)
 
 	translatedBlocks, stats, err := proc.Process(t.Ctx, blocks, t.CompletedChunks, func(current, total int, msg string) {
@@ -1815,7 +1860,7 @@ func runTranslationTask(t *TranslationTask) {
 
 		elapsedSec := currentElapsedSec(t, time.Now())
 		etaSec := computeEtaSec(t.Current, total, elapsedSec)
-		t.MessageCh <- webtask.LogMsg{
+		trySendTaskMessage(msgCh, webtask.LogMsg{
 			Type:       mType,
 			Message:    msg,
 			Total:      total,
@@ -1823,7 +1868,7 @@ func runTranslationTask(t *TranslationTask) {
 			Status:     t.Status,
 			ElapsedSec: int(elapsedSec),
 			EtaSec:     etaSec,
-		}
+		})
 	}, func(chunkID, translatedText string) {
 		t.StateMu.Lock()
 		if t.CompletedChunks == nil {
@@ -1849,10 +1894,21 @@ func runTranslationTask(t *TranslationTask) {
 				return
 			}
 			accumulateElapsed(t, time.Now())
-			if t.Status != "deleted" {
+			// Only transition to paused when we still own the task: a resume
+			// may have already flipped it to queued while we were winding
+			// down — clobbering that would strand the task (the worker would
+			// pop it, see paused, and skip it forever).
+			mu.Lock()
+			switch t.Status {
+			case "deleted":
+				// deleted mid-flight: do not resurrect any state
+			case "running":
 				t.Status = "paused"
 				t.StatusReason = "paused_by_user"
+			default:
+				// queued (resume raced us) or already paused: leave as-is
 			}
+			mu.Unlock()
 			saveTaskState(t)
 			elapsedSec := currentElapsedSec(t, time.Now())
 			etaSec := computeEtaSec(t.Current, t.Total, elapsedSec)
@@ -1903,13 +1959,13 @@ func runTranslationTask(t *TranslationTask) {
 
 	elapsedSec := currentElapsedSec(t, time.Now())
 	etaSec := computeEtaSec(t.Current, t.Total, elapsedSec)
-	t.MessageCh <- webtask.LogMsg{
+	trySendTaskMessage(msgCh, webtask.LogMsg{
 		Status:     "completed",
 		Total:      t.Total,
 		Current:    t.Total,
 		ElapsedSec: int(elapsedSec),
 		EtaSec:     etaSec,
-	}
+	})
 }
 
 func formatDuration(d time.Duration) string {

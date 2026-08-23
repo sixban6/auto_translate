@@ -49,6 +49,7 @@ func TestFailure_LogFile_Generation(t *testing.T) {
 	cfg := &config.Config{
 		APIURL:            server.URL,
 		Model:             "dummy",
+		ChapterBatching:   true,
 		MaxChunkSize:      500,
 		Concurrency:       1,
 		MaxRetries:        1,

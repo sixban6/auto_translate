@@ -95,6 +95,9 @@ func joinEntryTexts(entries []*batchEntry) string {
 // MaxChunkSize; a block larger than MaxChunkSize is split by sentences, each
 // piece becoming its own batch.
 func (p *Processor) buildBatches(blocks []parser.TextBlock) []*batch {
+	if !p.cfg.ChapterBatching {
+		return p.buildClassicBatches(blocks)
+	}
 	target := p.cfg.MaxChunkSize
 	if target <= 0 {
 		target = 2400
@@ -177,6 +180,47 @@ func (p *Processor) buildBatches(blocks []parser.TextBlock) []*batch {
 		cur.Text = joinEntryTexts(cur.Entries)
 	}
 	flush()
+	return batches
+}
+
+// buildClassicBatches is the pre-chapter translation plan: every block is
+// its own request (oversized blocks are still sentence-split so a single
+// huge paragraph cannot overflow the model). Batch IDs intentionally use
+// the legacy "{blockID}-{piece}" key format, making checkpoints from the
+// per-block era resume without re-translating.
+func (p *Processor) buildClassicBatches(blocks []parser.TextBlock) []*batch {
+	target := p.cfg.MaxChunkSize
+	if target <= 0 {
+		target = 2400
+	}
+	var batches []*batch
+	for _, b := range blocks {
+		text := strings.TrimSpace(b.OriginalText)
+		if text == "" {
+			continue
+		}
+		if utf8.RuneCountInString(text) > target {
+			pieceIdx := 0
+			for _, piece := range p.splitText(text) {
+				pt := strings.TrimSpace(piece)
+				if pt == "" {
+					continue
+				}
+				batches = append(batches, &batch{
+					ID:      fmt.Sprintf("%s-%d", b.ID, pieceIdx),
+					Entries: []*batchEntry{{BlockID: b.ID, PieceIndex: pieceIdx, Text: pt}},
+					Text:    pt,
+				})
+				pieceIdx++
+			}
+			continue
+		}
+		batches = append(batches, &batch{
+			ID:      fmt.Sprintf("%s-0", b.ID),
+			Entries: []*batchEntry{{BlockID: b.ID, PieceIndex: 0, Text: text}},
+			Text:    text,
+		})
+	}
 	return batches
 }
 
@@ -428,7 +472,7 @@ func applyFinalEntryTexts(batches []*batch, stateMap map[string]string, wholeLeg
 			for _, e := range entries {
 				if e.PieceIndex == 0 {
 					e.Translated = strings.TrimSpace(whole)
-				e.Covered = true
+					e.Covered = true
 				} else {
 					e.Translated = ""
 					e.SuppressOriginal = true
@@ -666,6 +710,11 @@ func (p *Processor) Process(ctx context.Context, blocks []parser.TextBlock, stat
 		workers = 1
 	}
 	chains := buildChains(batches, chainLenCap(total, workers))
+	if !p.cfg.ChapterBatching {
+		// Classic mode: no rolling context — every request stands alone, so
+		// chains of length 1 give full parallelism.
+		chains = buildChains(batches, 1)
+	}
 	chainCh := make(chan []*batch, len(chains))
 	for _, c := range chains {
 		chainCh <- c
@@ -716,7 +765,7 @@ func (p *Processor) Process(ctx context.Context, blocks []parser.TextBlock, stat
 									e.Translated = ""
 									e.SuppressOriginal = true
 								}
-								}
+							}
 							b.Status = translator.StatusSuccess
 							b.FromCache = true
 							prevTail = tailOf(whole, 600)
@@ -1062,11 +1111,11 @@ func (p *Processor) splitText(text string) []string {
 		}
 		if utf8.RuneCountInString(currentChunk.String())+utf8.RuneCountInString(part) > maxLen {
 			flushChunk()
-			currentChunk.WriteString(part)
-			continue
 		}
 		if currentChunk.Len() > 0 {
-			currentChunk.WriteString(" ")
+			if needsJoinSpace(lastRuneOf(currentChunk.String()), firstRuneOf(part)) {
+				currentChunk.WriteString(" ")
+			}
 		}
 		currentChunk.WriteString(part)
 	}
@@ -1090,6 +1139,9 @@ func splitIntoSentences(text string) []string {
 		}
 		if isSentenceTerminator(r) {
 			if r == '.' {
+				if isAbbreviationDot(runes, i) {
+					continue
+				}
 				next := nextNonSpaceRune(runes, i+1)
 				if next != 0 && !(next >= 'A' && next <= 'Z') {
 					continue
@@ -1123,30 +1175,93 @@ func isSentenceTerminator(r rune) bool {
 	}
 }
 
-func splitByWeakSeparators(text string, maxLen int) []string {
-	var result []string
-	var sb strings.Builder
-	runes := []rune(text)
-	for i := 0; i < len(runes); i++ {
-		r := runes[i]
-		sb.WriteRune(r)
-		if isWeakSeparator(r) && utf8.RuneCountInString(sb.String()) >= maxLen/2 {
-			part := strings.TrimSpace(sb.String())
-			if part != "" {
-				result = append(result, part)
-			}
-			sb.Reset()
-		}
-		if utf8.RuneCountInString(sb.String()) >= maxLen {
-			part := strings.TrimSpace(sb.String())
-			if part != "" {
-				result = append(result, part)
-			}
-			sb.Reset()
-		}
+// abbreviationWords are tokens after which a dot is part of the token, not
+// a sentence end ("Mr. Smith", "etc. items", "approx. value").
+var abbreviationWords = map[string]bool{
+	"mr": true, "mrs": true, "ms": true, "dr": true, "prof": true,
+	"sr": true, "jr": true, "st": true, "mt": true, "rev": true,
+	"gen": true, "col": true, "capt": true, "lt": true, "sgt": true,
+	"vs": true, "etc": true, "eg": true, "ie": true, "al": true,
+	"fig": true, "figs": true, "vol": true, "ch": true, "sec": true,
+	"ed": true, "eds": true, "inc": true, "ltd": true, "co": true,
+	"corp": true, "dept": true, "univ": true, "approx": true,
+	"ibid": true, "viz": true, "cf": true,
+}
+
+// isAbbreviationDot reports whether the '.' at runes[dotIdx] belongs to an
+// abbreviation rather than ending a sentence. Two shapes are recognized:
+// a known abbreviation word ("Mr.", "etc."), and initial-letter sequences
+// ("U.S.", "J. K.") where a single letter is followed by the dot. Decimal
+// points ("3.14") have no letter token and fall through untouched.
+func isAbbreviationDot(runes []rune, dotIdx int) bool {
+	j := dotIdx - 1
+	var tok []rune
+	for j >= 0 && unicode.IsLetter(runes[j]) && len(tok) < 8 {
+		tok = append([]rune{runes[j]}, tok...)
+		j--
 	}
-	if strings.TrimSpace(sb.String()) != "" {
-		result = append(result, strings.TrimSpace(sb.String()))
+	if len(tok) == 0 {
+		return false // decimal point, ellipsis, etc.
+	}
+	if len(tok) == 1 {
+		return true // "U.S." / "J. K." initial style
+	}
+	return abbreviationWords[strings.ToLower(string(tok))]
+}
+
+// splitByWeakSeparators breaks an oversized sentence at clause punctuation
+// (commas, semicolons, colons) and, failing that, at a whitespace word
+// boundary — never through the middle of a word. A run with no whitespace
+// at all (e.g. a very long URL) is the only case cut at exactly maxLen,
+// because there is no safer boundary to find.
+func splitByWeakSeparators(text string, maxLen int) []string {
+	runes := []rune(text)
+	var result []string
+	start := 0
+	for start < len(runes) {
+		if len(runes)-start <= maxLen {
+			part := strings.TrimSpace(string(runes[start:]))
+			if part != "" {
+				result = append(result, part)
+			}
+			break
+		}
+		cut := -1
+		minCut := start + maxLen/4 // avoid degenerate slivers
+		// Prefer the last clause punctuation inside the window.
+		for i := start + maxLen - 1; i > minCut; i-- {
+			if isWeakSeparator(runes[i]) {
+				cut = i + 1
+				break
+			}
+		}
+		// Fall back to the last whitespace inside the window (word boundary).
+		if cut < 0 {
+			for i := start + maxLen - 1; i > minCut; i-- {
+				if unicode.IsSpace(runes[i]) {
+					cut = i + 1
+					break
+				}
+			}
+		}
+		// Look a little further ahead for the next word boundary so the
+		// overflow stays bounded instead of cutting a word in half.
+		if cut < 0 {
+			for i := start + maxLen; i < len(runes) && i <= start+maxLen+maxLen/4; i++ {
+				if unicode.IsSpace(runes[i]) {
+					cut = i + 1
+					break
+				}
+			}
+		}
+		if cut < 0 {
+			cut = start + maxLen // whitespace-free run: hard cut
+		}
+		part := strings.TrimSpace(string(runes[start:cut]))
+		if part != "" {
+			result = append(result, part)
+		}
+		start = cut
 	}
 	return result
 }
