@@ -114,30 +114,33 @@ func ResolveEngine(apiURL, model, engine string) string {
 
 // Config holds the configuration for the auto-translation program.
 type Config struct {
-	APIURL            string            `json:"api_url"`             // e.g. "http://127.0.0.1:8000/v1/chat/completions" (oMLX)
-	Engine            string            `json:"engine"`              // "omlx" (default), "mlx" or "ollama"
-	Model             string            `json:"model"`               // e.g. "Qwen3.8-27B-oQ4e-mtp"
-	APIKey            string            `json:"api_key"`             // Bearer token for the engine (oMLX reads ~/.omlx/settings.json when empty)
-	Prompt            string            `json:"prompt"`              // System prompt
-	PromptRole        string            `json:"prompt_role"`         // Role name for system prompt
-	Glossary          map[string]string `json:"glossary"`            // Dictionary of EN -> CN terms
-	Concurrency       int               `json:"concurrency"`         // Number of concurrent translations, e.g. 2
-	Temperature       float64           `json:"temperature"`         // Translation temperature, e.g. 0.1
-	MaxChunkSize      int               `json:"max_chunk_size"`      // Max length of one chapter batch (runes)
-	MaxRetries        int               `json:"max_retries"`         // Max retry attempts per chunk
-	RequestTimeoutSec int               `json:"request_timeout_sec"` // HTTP timeout in seconds
-	InputFile         string            `json:"input_file"`          // Path to input file (.txt, .epub)
-	OutputFile        string            `json:"output_file"`         // Path to save output file
-	Bilingual         bool              `json:"bilingual"`           // Output bilingual format if true
+	APIURL      string            `json:"api_url"`     // e.g. "http://127.0.0.1:8000/v1/chat/completions" (oMLX)
+	Engine      string            `json:"engine"`      // "omlx" (default), "mlx" or "ollama"
+	Model       string            `json:"model"`       // e.g. "Qwen3.8-27B-oQ4e-mtp"
+	APIKey      string            `json:"api_key"`     // Bearer token for the engine (oMLX reads ~/.omlx/settings.json when empty)
+	Prompt      string            `json:"prompt"`      // System prompt
+	PromptRole  string            `json:"prompt_role"` // Role name for system prompt
+	Glossary    map[string]string `json:"glossary"`    // Dictionary of EN -> CN terms
+	Concurrency int               `json:"concurrency"` // Number of concurrent translations, e.g. 2
+	// autoPlanned marks that Concurrency was filled in by AutoDetectAnd-
+	// Calculate (as opposed to a user-supplied value). Internal only.
+	autoPlanned       bool
+	Temperature       float64 `json:"temperature"`         // Translation temperature, e.g. 0.1
+	MaxChunkSize      int     `json:"max_chunk_size"`      // Max length of one chapter batch (runes)
+	MaxRetries        int     `json:"max_retries"`         // Max retry attempts per chunk
+	RequestTimeoutSec int     `json:"request_timeout_sec"` // HTTP timeout in seconds
+	InputFile         string  `json:"input_file"`          // Path to input file (.txt, .epub)
+	OutputFile        string  `json:"output_file"`         // Path to save output file
+	Bilingual         bool    `json:"bilingual"`           // Output bilingual format if true
 	// ChapterBatching enables the chapter-aware pipeline: paragraphs of
 	// the same chapter are packed into batches and translated with the
 	// chapter title plus rolling previous-tail context. When false (the
 	// default), every paragraph is translated independently — the classic
 	// per-block mode — with state keys identical to the pre-chapter
 	// version, so old checkpoints resume seamlessly.
-	ChapterBatching   bool              `json:"chapter_batching"`
-	SystemWarning     string            `json:"-"`                   // Runtime hardware warning
-	SystemInfoMsg     string            `json:"-"`                   // Runtime hardware info
+	ChapterBatching bool   `json:"chapter_batching"`
+	SystemWarning   string `json:"-"` // Runtime hardware warning
+	SystemInfoMsg   string `json:"-"` // Runtime hardware info
 }
 
 // Load loads the configuration from a JSON file.
@@ -188,9 +191,11 @@ func (cfg *Config) AutoDetectAndCalculate() {
 		if err != nil {
 			// fallback
 			cfg.Concurrency = 1
+			cfg.autoPlanned = true
 			cfg.SystemInfoMsg = fmt.Sprintf("[配置检测] 未知配置。建议并发数：%d。", cfg.Concurrency)
 		} else {
 			cfg.Concurrency = info.RecommendedC
+			cfg.autoPlanned = true
 			if info.WarningMsg != "" {
 				cfg.SystemWarning = info.WarningMsg
 			}
@@ -199,19 +204,30 @@ func (cfg *Config) AutoDetectAndCalculate() {
 	} else if cfg.SystemInfoMsg == "" {
 		cfg.SystemInfoMsg = fmt.Sprintf("[配置检测] 用户指定并发数：%d。", cfg.Concurrency)
 	}
-	if cfg.Concurrency > cpuCap {
-		cfg.Concurrency = cpuCap
-		if cfg.SystemWarning != "" {
-			cfg.SystemWarning += " "
+	// Caps apply to AUTO planning only. A sane user-specified value (1..16,
+	// the web UI range is 1..2x recommended) is explicit intent and is
+	// respected as-is; anything beyond 16 is treated as a config error and
+	// falls back to the conservative caps.
+	userPinned := cfg.Concurrency > 0 && !cfg.autoPlanned && cfg.Concurrency <= 16
+	if userPinned {
+		if cfg.Concurrency > cpuCap || cfg.Concurrency > modelCap {
+			cfg.SystemInfoMsg += " （超出自动规划上限，已按用户指定执行；若出现排队超时可降低）"
 		}
-		cfg.SystemWarning += fmt.Sprintf("⚠️ 并发上限已按 CPU 核心约束为 %d（核心数-1）。", cpuCap)
-	}
-	if cfg.Concurrency > modelCap {
-		cfg.Concurrency = modelCap
-		if cfg.SystemWarning != "" {
-			cfg.SystemWarning += " "
+	} else {
+		if cfg.Concurrency > cpuCap {
+			cfg.Concurrency = cpuCap
+			if cfg.SystemWarning != "" {
+				cfg.SystemWarning += " "
+			}
+			cfg.SystemWarning += fmt.Sprintf("⚠️ 并发上限已按 CPU 核心约束为 %d（核心数-1）。", cpuCap)
 		}
-		cfg.SystemWarning += fmt.Sprintf("⚠️ 当前模型已启用稳态并发上限 %d，以降低排队超时。", modelCap)
+		if cfg.Concurrency > modelCap {
+			cfg.Concurrency = modelCap
+			if cfg.SystemWarning != "" {
+				cfg.SystemWarning += " "
+			}
+			cfg.SystemWarning += fmt.Sprintf("⚠️ 当前模型已启用稳态并发上限 %d，以降低排队超时。", modelCap)
+		}
 	}
 
 	if cfg.Temperature <= 0 {

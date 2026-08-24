@@ -71,6 +71,11 @@ type batch struct {
 	Title   string
 	Entries []*batchEntry
 	Text    string
+	// IsHeading marks a heading-only batch: it cuts chapters and provides
+	// the chapter title, but its own translation is NOT used as rolling
+	// context for the following body batch (a title adds nothing useful
+	// there and can leak into body translations on small models).
+	IsHeading bool
 
 	Translated string
 	Status     translator.TranslationStatus
@@ -131,12 +136,26 @@ func (p *Processor) buildBatches(blocks []parser.TextBlock) []*batch {
 
 		if b.HeadingLevel == 1 || b.HeadingLevel == 2 {
 			// Real chapter heading inside the stream: start a fresh chapter.
+			// The heading itself always becomes its OWN single-entry batch —
+			// never packed with body paragraphs — so the paragraph-count
+			// contract with the model stays exact and the heading translation
+			// can never bleed into (or get swallowed by) a body paragraph.
 			flush()
 			autoSeq++
 			curFile = ch
 			curChapter = fmt.Sprintf("hd_%d", autoSeq)
 			chapterTitle = previewOf(text, 80)
 			seq = 0
+			batches = append(batches, &batch{
+				ID:        fmt.Sprintf("%s@%d", curChapter, seq),
+				Chapter:   curChapter,
+				Title:     chapterTitle,
+				Entries:   []*batchEntry{{BlockID: b.ID, PieceIndex: 0, Text: text}},
+				Text:      text,
+				IsHeading: true,
+			})
+			seq++
+			continue
 		} else if ch != curFile {
 			flush()
 			curFile = ch
@@ -783,7 +802,9 @@ func (p *Processor) Process(ctx context.Context, blocks []parser.TextBlock, stat
 						b.Status = translator.StatusSuccess
 						b.FromCache = true
 						mapTranslationToEntries(b.Translated, b.Entries)
-						prevTail = tailOf(b.Translated, 600)
+						if !b.IsHeading {
+							prevTail = tailOf(b.Translated, 600)
+						}
 						mu.Lock()
 						n := atomic.AddInt64(&completed, 1)
 						stats.SuccessCount++
@@ -806,7 +827,9 @@ func (p *Processor) Process(ctx context.Context, blocks []parser.TextBlock, stat
 						b.Translated = sb.String()
 						b.Status = translator.StatusSuccess
 						b.FromCache = true
-						prevTail = tailOf(b.Translated, 600)
+						if !b.IsHeading {
+							prevTail = tailOf(b.Translated, 600)
+						}
 						mu.Lock()
 						n := atomic.AddInt64(&completed, 1)
 						stats.SuccessCount++
@@ -834,7 +857,9 @@ func (p *Processor) Process(ctx context.Context, blocks []parser.TextBlock, stat
 					n := atomic.AddInt64(&completed, 1)
 					switch {
 					case err == nil && status == translator.StatusSuccess:
-						prevTail = tailOf(translated, 600)
+						if !b.IsHeading {
+							prevTail = tailOf(translated, 600)
+						}
 						emitProgress(int(n), fmt.Sprintf("✅ [批 %s] 完成: %s", b.ID, previewOf(translated, 60)))
 						stats.SuccessCount++
 					case err == nil && status == translator.StatusFallback:

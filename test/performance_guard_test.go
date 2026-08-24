@@ -13,6 +13,9 @@ import (
 )
 
 func TestConfig_ConcurrencyCappedByCPUCoresMinusOne(t *testing.T) {
+	// Absurd values (999) are treated as config errors and fall back to the
+	// conservative cap; sane user-pinned values are respected (see
+	// TestUserPinnedConcurrency_NotCapped).
 	cfg := &config.Config{
 		Model:       "translategemma:12b",
 		Concurrency: 999,
@@ -28,7 +31,7 @@ func TestConfig_ConcurrencyCappedByCPUCoresMinusOne(t *testing.T) {
 		expectedMax = 4
 	}
 	if cfg.Concurrency != expectedMax {
-		t.Fatalf("expected concurrency capped to %d, got %d", expectedMax, cfg.Concurrency)
+		t.Fatalf("expected absurd value capped to %d, got %d", expectedMax, cfg.Concurrency)
 	}
 }
 

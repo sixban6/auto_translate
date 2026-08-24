@@ -94,17 +94,46 @@ func TestHeadingBlocksCutChapters(t *testing.T) {
 	mu.Lock()
 	reqs := append([]capturedRequest{}, (*reqsPtr)...)
 	mu.Unlock()
-	if len(reqs) != 2 {
-		t.Fatalf("Expected 2 chapter batches, got %d", len(reqs))
+	// Headings are always their own single-paragraph batch now: one per h2
+	// plus one body batch per chapter (the heading cuts the chapter).
+	if len(reqs) != 4 {
+		t.Fatalf("Expected 4 batches (2 headings + 2 chapter bodies), got %d", len(reqs))
 	}
-	if !strings.Contains(reqs[0].User, "Chapter 1") || !strings.Contains(reqs[0].User, "chapter one, first") {
-		t.Errorf("first batch should hold chapter 1 content: %q", reqs[0].User)
+	headingReqs, bodyReqs := 0, 0
+	for _, r := range reqs {
+		if !strings.Contains(r.User, "Body") && (strings.Contains(r.User, "Chapter 1") || strings.Contains(r.User, "Chapter 2")) {
+			headingReqs++
+		} else {
+			bodyReqs++
+		}
 	}
-	if !strings.Contains(reqs[1].System, "Chapter 2: The Antidote") {
-		t.Errorf("second batch should carry the chapter 2 title context: %q", reqs[1].System)
+	if headingReqs != 2 || bodyReqs != 2 {
+		t.Fatalf("expected 2 heading batches + 2 body batches, got %d/%d", headingReqs, bodyReqs)
 	}
-	if strings.Contains(reqs[1].System, "前文译文") {
-		t.Errorf("rolling context must not cross chapter boundaries: %q", reqs[1].System)
+	// The two body paragraphs of chapter one still share one batch.
+	var ch1Body string
+	for _, r := range reqs {
+		if strings.Contains(r.User, "chapter one, first") {
+			ch1Body = r.User
+		}
+	}
+	if !strings.Contains(ch1Body, "chapter one, second") {
+		t.Errorf("chapter 1 body paragraphs should share one batch: %q", ch1Body)
+	}
+	for _, r := range reqs {
+		if strings.Contains(r.User, "Body") && strings.Contains(r.User, "Chapter 2: The Antidote") {
+			t.Errorf("heading text must not be packed with body: %q", r.User)
+		}
+	}
+	for _, r := range reqs {
+		if strings.Contains(r.User, "Body of chapter two") {
+			if !strings.Contains(r.System, "Chapter 2: The Antidote") {
+				t.Errorf("chapter 2 body should carry the title context: %q", r.System)
+			}
+			if strings.Contains(r.System, "前文译文") {
+				t.Errorf("rolling context must not cross chapter boundaries: %q", r.System)
+			}
+		}
 	}
 }
 
